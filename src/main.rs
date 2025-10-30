@@ -33,25 +33,36 @@ fn handle_connection(
         addr.port()
     );
 
-    'MAIN_LOOP: loop {
-        let mut buffer = [0; BUFFER_SIZE];
-        let mut cmd = String::new();
-
-        'READ_LOOP: loop {
-            let read = stream.read(&mut buffer)?;
-            if let Ok(chunk) = String::from_utf8(buffer[0..read].to_vec()) {
-                println!("read chunk: {chunk}");
-                cmd.push_str(chunk.as_str());
-                if read < BUFFER_SIZE {
-                    break 'READ_LOOP;
-                }
-            } else {
-                break 'MAIN_LOOP;
-            }
-        }
+    loop {
+        let cmd = read_command(&mut stream)?;
 
         println!("read raw command {cmd}");
-        stream.write_all("+PONG\r\n".as_bytes())?;
+        match stream.write_all("+PONG\r\n".as_bytes()) {
+            Ok(_) => (),
+            Err(_) => break,
+        }
     }
+
     Ok(())
+}
+
+fn read_command(stream: &mut std::net::TcpStream) -> Result<String, std::io::Error> {
+    let mut buffer = [0; BUFFER_SIZE];
+    let mut cmd = String::new();
+    'READ_LOOP: loop {
+        let read = stream.read(&mut buffer)?;
+        if let Ok(chunk) = String::from_utf8(buffer[0..read].to_vec()) {
+            println!("read chunk: {chunk}");
+            cmd.push_str(chunk.as_str());
+            if read < BUFFER_SIZE {
+                break 'READ_LOOP;
+            }
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "read invalid utf 8 from the stream",
+            ));
+        }
+    }
+    Ok(cmd)
 }
