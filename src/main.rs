@@ -49,7 +49,7 @@ fn handle_connection(
         }
 
         println!("read raw command {cmd}");
-        stream.write("+PONG\r\n".as_bytes())?;
+        stream.write_all("+PONG\r\n".as_bytes())?;
 
     }
     Ok(())
