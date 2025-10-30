@@ -13,7 +13,9 @@ fn main() {
 
     loop {
         match listener.accept() {
-            Ok((stream, addr)) => handle_connection(stream, addr).unwrap(),
+            Ok((stream, addr)) => {
+                std::thread::spawn(move || handle_connection(stream, addr).unwrap());
+            }
             Err(e) => println!("error: {}", e),
         }
     }
@@ -50,7 +52,6 @@ fn handle_connection(
 
         println!("read raw command {cmd}");
         stream.write_all("+PONG\r\n".as_bytes())?;
-
     }
     Ok(())
 }
