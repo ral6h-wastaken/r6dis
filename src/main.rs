@@ -1,5 +1,8 @@
 #![allow(unused_imports)]
-use std::{io::Write, net::TcpListener};
+use std::{
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+};
 
 fn main() -> Result<(), anyhow::Error> {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
@@ -12,11 +15,9 @@ fn main() -> Result<(), anyhow::Error> {
 
     for stream in listener.incoming() {
         match stream {
-            Ok(mut stream) => {
+            Ok(stream) => {
                 println!("accepted new connection");
-                if let Err(err) = stream.write(b"+PONG\r\n") {
-                    anyhow::bail!("Error while writing back response {}", err )
-                }
+                handle_connection(stream)?;
             }
             Err(e) => {
                 eprintln!("error: {}", e);
@@ -25,4 +26,17 @@ fn main() -> Result<(), anyhow::Error> {
     }
 
     Ok(())
+}
+
+fn handle_connection(mut stream: TcpStream) -> Result<(), anyhow::Error> {
+    loop {
+        let mut buf = [0;12];
+        if let Err(err) = stream.read(&mut buf) {
+            anyhow::bail!("Error while reading message {err}")
+        }
+        println!("Got message {buf:?}");
+        if let Err(err) = stream.write(b"+PONG\r\n") {
+            anyhow::bail!("Error while writing back response {err}")
+        }
+    }
 }
