@@ -2,41 +2,28 @@
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    os::fd::AsRawFd as _,
 };
 
-fn main() -> Result<(), anyhow::Error> {
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    // let msg = "Logs from your program will appear here!";
-    // println!("{msg}");
+mod poll;
+mod ev_loop;
 
-    // Uncomment the code below to pass the first stage
+use crate::poll::Poller;
 
-    let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
+fn main() -> std::io::Result<()> {
+    const PORT: u32 = 6379;
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                println!("accepted new connection");
-                handle_connection(stream)?;
-            }
-            Err(e) => {
-                eprintln!("error: {}", e);
-            }
-        }
-    }
+    let listener = TcpListener::bind(format!("127.0.0.1:{PORT}").as_str())
+        .expect(format!("Error while binding to port {PORT}").as_str());
 
-    Ok(())
-}
+    listener.set_nonblocking(true).map_err(|err| {
+        eprintln!("Could not set listener to non blocking mode");
+        err
+    })?;
 
-fn handle_connection(mut stream: TcpStream) -> Result<(), anyhow::Error> {
-    loop {
-        let mut buf = [0;12];
-        if let Err(err) = stream.read(&mut buf) {
-            anyhow::bail!("Error while reading message {err}")
-        }
-        println!("Got message {buf:?}");
-        if let Err(err) = stream.write(b"+PONG\r\n") {
-            anyhow::bail!("Error while writing back response {err}")
-        }
-    }
+    let poller = Poller::new(&listener)?;
+    // let looper = crate::ev_loop::EventLoop::new(listener, poller);
+    let mut looper = crate::ev_loop::EventLoop::new(listener, poller);
+
+    looper.run()
 }
