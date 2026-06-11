@@ -50,11 +50,12 @@ mod redis {
     #[derive(Debug, Eq, PartialEq)]
     pub enum RespType {
         //*<number-of-elements>\r\n<element-1>...<element-n>
-        ARRAY { len: usize, elements: Vec<RespType> },
+        Array { len: usize, elements: Vec<RespType> },
         //+<content>\r\n
-        SIMPLE_STRING { content: String },
+        SimpleString { content: String },
         //$<length>\r\n<data>\r\n
-        BULK_STRING { length: usize, data: String },
+        BulkString { length: usize, data: Vec<u8> },
+        NullBulkString,
     }
 
     impl TryFrom<Vec<u8>> for RespType {
@@ -80,14 +81,118 @@ mod redis {
                     }
 
                     match String::from_utf8(value.to_vec()) {
-                        Ok(content) => Ok(RespType::SIMPLE_STRING { content }),
+                        Ok(content) => Ok(RespType::SimpleString { content }),
                         Err(_) => Err(io::Error::new(
                             io::ErrorKind::Other,
                             "Simple string must be a valid utf8 encoded string",
                         )),
                     }
                 }
-                b'$' => todo!("parse bulk string"),
+
+                b'$' => {
+                    let value = &value[1..];
+
+                    if let None = value.get(0) {
+                        return Err(io::Error::new(io::ErrorKind::Other, "Invalid bulk string"));
+                    }
+
+                    match value.get(0).unwrap() {
+                        b'-' => {
+                            return if b"-1\r\n" == value {
+                                Ok(RespType::NullBulkString)
+                            } else {
+                                Err(io::Error::new(
+                                    io::ErrorKind::Other,
+                                    "Only null bulk strings can start with -",
+                                ))
+                            };
+                        }
+                        _ => {
+                            let mut len_barr = Vec::<u8>::new();
+                            let mut found_r = false;
+
+                            let value_iter = value.iter();
+
+                            'len_parsing: for c in value_iter {
+                                match c {
+                                    b'\r' => found_r = true,
+                                    b'\n' => {
+                                        if !found_r {
+                                            return Err(io::Error::new(
+                                                io::ErrorKind::Other,
+                                                "Invalid bulk string length",
+                                            ));
+                                        }
+
+                                        break 'len_parsing;
+                                    }
+                                    _ => {
+                                        //avoid cases where \r and \n are not near each other
+                                        //we could use a peekable iterator but this will do it for
+                                        //now
+                                        if found_r {
+                                            return Err(io::Error::new(
+                                                io::ErrorKind::Other,
+                                                "Invalid bulk string length",
+                                            ));
+                                        }
+                                        //check if in 0-9 ascii range
+                                        if *c >= 48u8 && *c <= 57u8 {
+                                            len_barr.push(*c);
+                                        } else {
+                                            return Err(io::Error::new(
+                                                io::ErrorKind::Other,
+                                                "Invalid bulk string length",
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+
+                            let bytes_len = len_barr.len();
+                            if bytes_len == 0 {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::Other,
+                                    "Invalid bulk string length",
+                                ));
+                            }
+
+                            let len_str = match String::from_utf8(len_barr) {
+                                Ok(l) => l,
+                                Err(_) => {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::Other,
+                                        "Invalid bulk string length",
+                                    ));
+                                }
+                            };
+
+                            let length = usize::from_str_radix(&len_str, 10)
+                                .expect("We have checked previously that every byte we push corresponds to valid ascii in the range 0-9");
+
+                            //skipping initial number + last 2 bytes of \r\n
+                            let remaining = &value[2 + bytes_len..];
+
+                            if !remaining.ends_with(b"\r\n") {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::Other,
+                                    "Bulk strings must end with \\r\\n",
+                                ));
+                            }
+
+                            let data = remaining[..remaining.len() - 2].to_vec();
+                            if data.len() != length {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::Other,
+                                    "Bulk string declared length does not match actual length",
+                                ));
+                            }
+
+                            return Ok(RespType::BulkString { length, data });
+                        }
+                    }
+                }
+
                 b'*' => todo!("parse array"),
                 _ => todo!(),
             }
@@ -102,7 +207,7 @@ mod redis {
 
         #[test]
         fn resptype_parse_simplestring() {
-            let expected = RespType::SIMPLE_STRING {
+            let expected = RespType::SimpleString {
                 content: "ciao".into(),
             };
 
@@ -135,6 +240,73 @@ mod redis {
             let err = invalid_utf8.err().unwrap();
             assert_eq!(
                 "Simple string must be a valid utf8 encoded string".to_string(),
+                err.to_string()
+            );
+        }
+
+        #[test]
+        fn resptype_parse_bulkstring() {
+            let non_null = RespType::BulkString {
+                length: 4,
+                data: b"ciao".to_vec(),
+            };
+
+            assert_eq!(
+                non_null,
+                RespType::try_from(b"$4\r\nciao\r\n".to_vec()).unwrap()
+            );
+
+            let null = RespType::NullBulkString;
+            assert_eq!(null, RespType::try_from(b"$-1\r\n".to_vec()).unwrap());
+
+            let invalid_null = RespType::try_from(b"$-4ciao\r\n".to_vec());
+
+            assert!(invalid_null.is_err());
+
+            let err = invalid_null.err().unwrap();
+            assert_eq!(
+                "Only null bulk strings can start with -".to_string(),
+                err.to_string()
+            );
+
+            let invalid_len = RespType::try_from(b"$c\r\n".to_vec());
+
+            assert!(invalid_len.is_err());
+
+            let err = invalid_len.err().unwrap();
+            assert_eq!("Invalid bulk string length".to_string(), err.to_string());
+
+            let invalid_len = RespType::try_from(b"$12\r2\r\n".to_vec());
+
+            assert!(invalid_len.is_err());
+
+            let err = invalid_len.err().unwrap();
+            assert_eq!("Invalid bulk string length".to_string(), err.to_string());
+
+            let invalid_len = RespType::try_from(b"$\r\nciao\r\n".to_vec());
+
+            assert!(invalid_len.is_err());
+
+            let err = invalid_len.err().unwrap();
+            assert_eq!("Invalid bulk string length".to_string(), err.to_string());
+
+            let invalid_len = RespType::try_from(b"$12\r\nciao\r\n".to_vec());
+
+            assert!(invalid_len.is_err());
+
+            let err = invalid_len.err().unwrap();
+            assert_eq!(
+                "Bulk string declared length does not match actual length".to_string(),
+                err.to_string()
+            );
+
+            let invalid_end = RespType::try_from(b"$4\r\nciao".to_vec());
+
+            assert!(invalid_end.is_err());
+
+            let err = invalid_end.err().unwrap();
+            assert_eq!(
+                "Bulk strings must end with \\r\\n".to_string(),
                 err.to_string()
             );
         }
