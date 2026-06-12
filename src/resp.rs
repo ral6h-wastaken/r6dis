@@ -24,7 +24,7 @@ impl TryFrom<Vec<u8>> for RespType {
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         let c = value
-            .get(0)
+            .first()
             .ok_or(io::Error::new(io::ErrorKind::Other, "Empty value"))?;
 
         Ok(parse_single_value(&value, c, 0)?.0)
@@ -55,9 +55,7 @@ fn parse_array(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Err
     let mut cursor = sep_idx + 2;
     let mut elements: Vec<RespType> = Vec::with_capacity(size);
 
-    while let Some(c) = value.get(cursor)
-        && cursor < value.len()
-    {
+    while let Some(c) = value.get(cursor) {
         let (parsed, new_pos) = parse_single_value(value, c, cursor)?;
         elements.push(parsed);
         cursor = new_pos;
@@ -102,22 +100,22 @@ fn parse_bulk_string(value: &[u8], cursor: usize) -> Result<(RespType, usize), i
             ));
         }
 
-        return Ok((
+        Ok((
             RespType::BulkString {
                 length,
                 data: value[cursor..sep_idx].to_vec(),
             },
             sep_idx + 2,
-        ));
+        ))
     } else {
-        return if length != -1 {
-            Err(io::Error::new(
+        if length != -1 {
+            return Err(io::Error::new(
                 io::ErrorKind::Other,
                 "Only null bulk strings can start with -",
-            ))
-        } else {
-            Ok((RespType::NullBulkString, sep_idx + 2))
-        };
+            ));
+        }
+
+        Ok((RespType::NullBulkString, sep_idx + 2))
     }
 }
 
@@ -146,33 +144,16 @@ fn parse_simple_string(value: &[u8], cursor: usize) -> Result<(RespType, usize),
 }
 
 fn find_separator_index(value: &[u8], cursor: usize) -> Option<usize> {
-    let mut found_r = false;
-    let mut r_idx = 0usize;
-
-    for (i, c) in value[cursor..].iter().enumerate() {
-        match c {
-            b'\r' => {
-                found_r = true;
-                r_idx = cursor + i; //with enumerate, i will always start at 0 thus we need to
-                //pad it
-            }
-            b'\n' => {
-                if found_r {
-                    return Some(r_idx);
-                }
-            }
-            _ => found_r = false,
-        };
-    }
-
-    None
+    value[cursor..]
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .map(|i| cursor + i)
 }
 
 #[cfg(test)]
 mod test {
+    use crate::resp::RespType;
     use std::io;
-
-    use crate::resp::{RespType, test};
 
     #[test]
     fn resptype_parse_simplestring() {
