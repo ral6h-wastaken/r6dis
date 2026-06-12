@@ -1,15 +1,21 @@
 use std::{io, str::FromStr};
 
-const SEPARATOR: &[u8; 2] = b"\r\n";
-
 #[derive(Debug, Eq, PartialEq)]
 pub enum RespType {
     //*<number-of-elements>\r\n<element-1>...<element-n>
-    Array { len: usize, elements: Vec<RespType> },
+    Array {
+        size: usize,
+        elements: Vec<RespType>,
+    },
     //+<content>\r\n
-    SimpleString { content: String },
+    SimpleString {
+        content: String,
+    },
     //$<length>\r\n<data>\r\n
-    BulkString { length: usize, data: Vec<u8> },
+    BulkString {
+        length: usize,
+        data: Vec<u8>,
+    },
     NullBulkString,
 }
 
@@ -17,26 +23,54 @@ impl TryFrom<Vec<u8>> for RespType {
     type Error = io::Error;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        let mut cursor = 0;
-        let len = value.len();
+        let c = value
+            .get(0)
+            .ok_or(io::Error::new(io::ErrorKind::Other, "Empty value"))?;
 
-        if let Some(c) = value.get(cursor) {
-            let (parsed, _) = match c {
-                b'+' => parse_simple_string(&value, cursor + 1)?,
-                b'$' => parse_bulk_string(&value, cursor + 1)?,
-                b'*' => parse_array(&value, cursor)?,
-                _ => todo!("Unsupported prefix {c}"),
-            };
-
-            return Ok(parsed);
-        }
-
-        todo!()
+        Ok(parse_single_value(&value, c, 0)?.0)
     }
 }
 
+fn parse_single_value(value: &[u8], c: &u8, cursor: usize) -> Result<(RespType, usize), io::Error> {
+    Ok(match c {
+        b'+' => parse_simple_string(&value, cursor + 1)?,
+        b'$' => parse_bulk_string(&value, cursor + 1)?,
+        b'*' => parse_array(&value, cursor + 1)?,
+        _ => todo!("Unsupported prefix {c}"),
+    })
+}
+
 fn parse_array(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Error> {
-    todo!("parse resp array")
+    //*<number-of-elements>\r\n<element-1>...<element-n>
+    let sep_idx = find_separator_index(value, cursor)
+        .ok_or(io::Error::new(io::ErrorKind::Other, "Invalid array size"))?;
+
+    let size = usize::from_str(
+        String::from_utf8(value[cursor..sep_idx].to_vec())
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid array size"))?
+            .as_str(),
+    )
+    .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid array size"))?;
+
+    let mut cursor = sep_idx + 2;
+    let mut elements: Vec<RespType> = Vec::with_capacity(size);
+
+    while let Some(c) = value.get(cursor)
+        && cursor < value.len()
+    {
+        let (parsed, new_pos) = parse_single_value(value, c, cursor)?;
+        elements.push(parsed);
+        cursor = new_pos;
+    }
+
+    if size != elements.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "Array declared size does not match actual size",
+        ));
+    }
+
+    Ok((RespType::Array { size, elements }, cursor))
 }
 
 fn parse_bulk_string(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Error> {
@@ -45,15 +79,12 @@ fn parse_bulk_string(value: &[u8], cursor: usize) -> Result<(RespType, usize), i
         "Invalid bulk string length",
     ))?;
 
-    eprintln!("value {value:?}, sep_idx {sep_idx}, cursor {cursor}");//, length {length}");
-
     let length = isize::from_str(
         String::from_utf8(value[cursor..sep_idx].to_vec())
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid bulk string length"))?
             .as_str(),
     )
     .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid bulk string length"))?;
-
 
     if length >= 0 {
         let length = length as usize;
@@ -80,13 +111,13 @@ fn parse_bulk_string(value: &[u8], cursor: usize) -> Result<(RespType, usize), i
         ));
     } else {
         return if length != -1 {
-             Err(io::Error::new(
+            Err(io::Error::new(
                 io::ErrorKind::Other,
                 "Only null bulk strings can start with -",
             ))
         } else {
             Ok((RespType::NullBulkString, sep_idx + 2))
-        }
+        };
     }
 }
 
@@ -248,36 +279,48 @@ mod test {
             err.to_string()
         );
     }
-    //
-    // #[test]
-    // fn resptype_parse_array() {
-    //     let array = RespType::Array {
-    //         len: 2,
-    //         elements: vec![
-    //             RespType::SimpleString {
-    //                 content: "ciao".into(),
-    //             },
-    //             RespType::BulkString {
-    //                 length: 4,
-    //                 data: "ciao".as_bytes().to_vec(),
-    //             },
-    //         ],
-    //     };
-    //
-    //     let array_literal = b"*2\r\n+ciao\r\n$4\r\nciao\r\n";
-    //
-    //     assert_eq!(array, RespType::try_from(array_literal.to_vec()).unwrap());
-    //
-    //     let empty = RespType::Array {
-    //         len: 0,
-    //         elements: vec![],
-    //     };
-    //
-    //     let empty_array_literal = b"*0\r\n";
-    //
-    //     assert_eq!(
-    //         empty,
-    //         RespType::try_from(empty_array_literal.to_vec()).unwrap()
-    //     );
-    // }
+
+    #[test]
+    fn resptype_parse_array() {
+        let array = RespType::Array {
+            size: 2,
+            elements: vec![
+                RespType::SimpleString {
+                    content: "ciao".into(),
+                },
+                RespType::BulkString {
+                    length: 4,
+                    data: "ciao".as_bytes().to_vec(),
+                },
+            ],
+        };
+
+        let array_literal = b"*2\r\n+ciao\r\n$4\r\nciao\r\n";
+
+        assert_eq!(array, RespType::try_from(array_literal.to_vec()).unwrap());
+
+        let empty = RespType::Array {
+            size: 0,
+            elements: vec![],
+        };
+
+        let empty_array_literal = b"*0\r\n";
+
+        assert_eq!(
+            empty,
+            RespType::try_from(empty_array_literal.to_vec()).unwrap()
+        );
+
+        let invalid_size = b"*3\r\n+ciao\r\n$4\r\nciao\r\n";
+        let error = RespType::try_from(invalid_size.to_vec());
+
+        assert!(error.is_err());
+
+        let err = error.err().unwrap();
+
+        assert_eq!(
+            "Array declared size does not match actual size".to_string(),
+            err.to_string()
+        );
+    }
 }
