@@ -22,15 +22,15 @@ impl TryFrom<Vec<u8>> for RespType {
 
         if let Some(c) = value.get(cursor) {
             let (parsed, _) = match c {
-                b'+' => parse_simple_string(&value, cursor+1)?,
-                b'$' => parse_bulk_string(&value, cursor)?,
+                b'+' => parse_simple_string(&value, cursor + 1)?,
+                b'$' => parse_bulk_string(&value, cursor + 1)?,
                 b'*' => parse_array(&value, cursor)?,
                 _ => todo!("Unsupported prefix {c}"),
             };
 
             return Ok(parsed);
-        } 
-        
+        }
+
         todo!()
     }
 }
@@ -40,15 +40,61 @@ fn parse_array(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Err
 }
 
 fn parse_bulk_string(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Error> {
-    todo!()
+    let sep_idx = find_separator_index(value, cursor).ok_or(io::Error::new(
+        io::ErrorKind::Other,
+        "Invalid bulk string length",
+    ))?;
+
+    eprintln!("value {value:?}, sep_idx {sep_idx}, cursor {cursor}");//, length {length}");
+
+    let length = isize::from_str(
+        String::from_utf8(value[cursor..sep_idx].to_vec())
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid bulk string length"))?
+            .as_str(),
+    )
+    .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid bulk string length"))?;
+
+
+    if length >= 0 {
+        let length = length as usize;
+        let cursor = sep_idx + 2;
+
+        let sep_idx = find_separator_index(value, cursor).ok_or(io::Error::new(
+            io::ErrorKind::Other,
+            "Bulk strings must end with \\r\\n",
+        ))?;
+
+        if (cursor + length) != sep_idx {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Bulk string declared length does not match actual length",
+            ));
+        }
+
+        return Ok((
+            RespType::BulkString {
+                length,
+                data: value[cursor..sep_idx].to_vec(),
+            },
+            sep_idx + 2,
+        ));
+    } else {
+        return if length != -1 {
+             Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Only null bulk strings can start with -",
+            ))
+        } else {
+            Ok((RespType::NullBulkString, sep_idx + 2))
+        }
+    }
 }
 
 fn parse_simple_string(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Error> {
-
-    let end_idx = match find_separator_index(value, cursor) {
-        Some(idx) => idx,
-        None => return Err(io::Error::new(io::ErrorKind::Other, "Simple string must end with \\r\\n"))
-    };
+    let end_idx = find_separator_index(value, cursor).ok_or(io::Error::new(
+        io::ErrorKind::Other,
+        "Simple string must end with \\r\\n",
+    ))?;
 
     let value = &value[cursor..end_idx];
 
@@ -72,19 +118,19 @@ fn find_separator_index(value: &[u8], cursor: usize) -> Option<usize> {
     let mut found_r = false;
     let mut r_idx = 0usize;
 
-    for (i,c) in value[cursor..].iter().enumerate() {
+    for (i, c) in value[cursor..].iter().enumerate() {
         match c {
             b'\r' => {
                 found_r = true;
-                r_idx = cursor + i;     //with enumerate, i will always start at 0 thus we need to
-                                        //pad it
-            },
-            b'\n' => { 
+                r_idx = cursor + i; //with enumerate, i will always start at 0 thus we need to
+                //pad it
+            }
+            b'\n' => {
                 if found_r {
-                    return Some(r_idx)
+                    return Some(r_idx);
                 }
-            },
-            _ => found_r = false
+            }
+            _ => found_r = false,
         };
     }
 
@@ -151,7 +197,7 @@ mod test {
         let null = RespType::NullBulkString;
         assert_eq!(null, RespType::try_from(b"$-1\r\n".to_vec()).unwrap());
 
-        let invalid_null = RespType::try_from(b"$-4ciao\r\n".to_vec());
+        let invalid_null = RespType::try_from(b"$-4\r\n".to_vec());
 
         assert!(invalid_null.is_err());
 
@@ -235,4 +281,3 @@ mod test {
     //     );
     // }
 }
-
