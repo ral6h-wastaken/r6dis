@@ -10,25 +10,8 @@ pub enum RespType {
     SimpleError { content: String },
     //$<length>\r\n<data>\r\n
     BulkString { data: Vec<u8> },
+    //$-1\r\n
     NullBulkString,
-}
-
-enum SimpleDataType {
-    String,
-    Error,
-}
-
-impl Display for &SimpleDataType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                SimpleDataType::String => "string",
-                SimpleDataType::Error => "error",
-            }
-        )
-    }
 }
 
 impl TryFrom<Vec<u8>> for RespType {
@@ -40,6 +23,52 @@ impl TryFrom<Vec<u8>> for RespType {
             .ok_or(io::Error::new(io::ErrorKind::Other, "Empty value"))?;
 
         Ok(parse_single_value(&value, c, 0)?.0)
+    }
+}
+
+impl RespType {
+    fn serialize(&self) -> Vec<u8> {
+        let mut result = Vec::<u8>::new();
+
+        match self {
+            RespType::Array { elements } => {
+                format!("*{}\r\n", elements.len())
+                    .as_bytes()
+                    .iter()
+                    .for_each(|c| result.push(*c));
+
+                elements
+                    .iter()
+                    .map(|el| el.serialize())
+                    .flatten()
+                    .for_each(|e| result.push(e));
+            }
+            RespType::SimpleString { content } => {
+                format!("+{}\r\n", content)
+                    .as_bytes()
+                    .iter()
+                    .for_each(|c| result.push(*c));
+            }
+            RespType::SimpleError { content } => {
+                format!("-{}\r\n", content)
+                    .as_bytes()
+                    .iter()
+                    .for_each(|c| result.push(*c));
+            },
+            RespType::BulkString { data } => {
+                format!("${}\r\n", data.len())
+                    .as_bytes()
+                    .iter()
+                    .for_each(|c| result.push(*c));
+
+                data.iter().for_each(|c| result.push(*c));
+
+                b"\r\n".iter().for_each(|c| result.push(*c));
+            },
+            RespType::NullBulkString => b"$-1\r\n".iter().for_each(|c| result.push(*c))
+        };
+
+        result
     }
 }
 
@@ -179,6 +208,26 @@ fn find_separator_index(value: &[u8], cursor: usize) -> Option<usize> {
         .map(|i| cursor + i)
 }
 
+//
+
+enum SimpleDataType {
+    String,
+    Error,
+}
+
+impl Display for &SimpleDataType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                SimpleDataType::String => "string",
+                SimpleDataType::Error => "error",
+            }
+        )
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::resp::RespType;
@@ -224,6 +273,15 @@ mod test {
     }
 
     #[test]
+    fn resptype_serialize_simplestring() {
+        let to_ser = RespType::SimpleString {
+            content: "ciao".into(),
+        };
+
+        assert_eq!(to_ser.serialize(), b"+ciao\r\n");
+    }
+
+    #[test]
     fn resptype_parse_simpleerr() {
         let expected = RespType::SimpleError {
             content: "ciao".into(),
@@ -260,6 +318,15 @@ mod test {
             "Simple error must be a valid utf8 encoded string".to_string(),
             err.to_string()
         );
+    }
+
+    #[test]
+    fn resptype_ser_simpleerr() {
+        let to_ser = RespType::SimpleError {
+            content: "ciao".into(),
+        };
+
+        assert_eq!(to_ser.serialize(), b"-ciao\r\n");
     }
 
     #[test]
@@ -329,6 +396,24 @@ mod test {
     }
 
     #[test]
+    fn resptype_serialize_bulkstring() {
+        let non_null = RespType::BulkString {
+            data: b"ciao".to_vec(),
+        };
+
+        assert_eq!(
+            non_null.serialize(),
+            b"$4\r\nciao\r\n"
+        );
+
+        let null = RespType::NullBulkString;
+        assert_eq!(
+            null.serialize(),
+            b"$-1\r\n"
+        );
+    }
+
+    #[test]
     fn resptype_parse_array() {
         let array = RespType::Array {
             elements: vec![
@@ -364,6 +449,31 @@ mod test {
         assert_eq!(
             "Array declared size does not match actual size".to_string(),
             err.to_string()
+        );
+    }
+
+    #[test]
+    fn resptype_serialize_array() {
+        let array = RespType::Array {
+            elements: vec![
+                RespType::SimpleString {
+                    content: "ciao".into(),
+                },
+                RespType::BulkString {
+                    data: "ciao".as_bytes().to_vec(),
+                },
+            ],
+        };
+        let array_literal = b"*2\r\n+ciao\r\n$4\r\nciao\r\n";
+
+        assert_eq!(array.serialize(), array_literal);
+
+        let empty = RespType::Array { elements: vec![] };
+        let empty_array_literal = b"*0\r\n";
+
+        assert_eq!(
+            empty.serialize(),
+            empty_array_literal
         );
     }
 }
