@@ -54,11 +54,10 @@ impl TryFrom<resp::RespType> for Command {
 fn parse_get_cmd(elements: Vec<RespType>) -> Result<Command, io::Error> {
     let key = elements
         .get(1)
-        .map(|k| match k {
+        .and_then(|k| match k {
             RespType::BulkString { data } => String::from_utf8(data.clone()).ok(),
             _ => None,
         })
-        .flatten()
         .ok_or(io::Error::other(
             "Invalid GET command: absent or invalid key",
         ))?;
@@ -69,22 +68,20 @@ fn parse_get_cmd(elements: Vec<RespType>) -> Result<Command, io::Error> {
 fn parse_set_cmd(elements: Vec<RespType>) -> Result<Command, io::Error> {
     let key = elements
         .get(1)
-        .map(|k| match k {
+        .and_then(|k| match k {
             RespType::BulkString { data } => String::from_utf8(data.clone()).ok(),
             _ => None,
         })
-        .flatten()
         .ok_or(io::Error::other(
             "Invalid SET command: absent or invalid key",
         ))?;
 
     let value = elements
         .get(2)
-        .map(|k| match k {
+        .and_then(|k| match k {
             RespType::BulkString { data } => String::from_utf8(data.clone()).ok(),
             _ => None,
         })
-        .flatten()
         .ok_or(io::Error::other(
             "Invalid SET command: absent or invalid value",
         ))?;

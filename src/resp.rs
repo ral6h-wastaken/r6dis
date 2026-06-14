@@ -20,7 +20,7 @@ impl TryFrom<&[u8]> for RespType {
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         let c = value.first().ok_or(io::Error::other("Empty value"))?;
 
-        Ok(parse_single_value(&value, c, 0)?.0)
+        Ok(parse_single_value(value, c, 0)?.0)
     }
 }
 
