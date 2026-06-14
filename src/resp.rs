@@ -3,19 +3,11 @@ use std::{io, str::FromStr};
 #[derive(Debug, Eq, PartialEq)]
 pub enum RespType {
     //*<number-of-elements>\r\n<element-1>...<element-n>
-    Array {
-        size: usize,
-        elements: Vec<RespType>,
-    },
+    Array { elements: Vec<RespType> },
     //+<content>\r\n
-    SimpleString {
-        content: String,
-    },
+    SimpleString { content: String },
     //$<length>\r\n<data>\r\n
-    BulkString {
-        length: usize,
-        data: Vec<u8>,
-    },
+    BulkString { data: Vec<u8> },
     NullBulkString,
 }
 
@@ -68,7 +60,7 @@ fn parse_array(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Err
         ));
     }
 
-    Ok((RespType::Array { size, elements }, cursor))
+    Ok((RespType::Array { elements }, cursor))
 }
 
 fn parse_bulk_string(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Error> {
@@ -102,7 +94,6 @@ fn parse_bulk_string(value: &[u8], cursor: usize) -> Result<(RespType, usize), i
 
         Ok((
             RespType::BulkString {
-                length,
                 data: value[cursor..sep_idx].to_vec(),
             },
             sep_idx + 2,
@@ -197,7 +188,6 @@ mod test {
     #[test]
     fn resptype_parse_bulkstring() {
         let non_null = RespType::BulkString {
-            length: 4,
             data: b"ciao".to_vec(),
         };
 
@@ -264,13 +254,11 @@ mod test {
     #[test]
     fn resptype_parse_array() {
         let array = RespType::Array {
-            size: 2,
             elements: vec![
                 RespType::SimpleString {
                     content: "ciao".into(),
                 },
                 RespType::BulkString {
-                    length: 4,
                     data: "ciao".as_bytes().to_vec(),
                 },
             ],
@@ -280,10 +268,7 @@ mod test {
 
         assert_eq!(array, RespType::try_from(array_literal.to_vec()).unwrap());
 
-        let empty = RespType::Array {
-            size: 0,
-            elements: vec![],
-        };
+        let empty = RespType::Array { elements: vec![] };
 
         let empty_array_literal = b"*0\r\n";
 

@@ -7,7 +7,7 @@ use std::{
 
 use libc::{EPOLLERR, EPOLLHUP, EPOLLIN, EPOLLOUT, EPOLLRDHUP};
 
-use crate::poll::Poller;
+use crate::{command::Command, poll::Poller, resp::RespType};
 
 #[derive(Debug)]
 struct Client {
@@ -38,6 +38,8 @@ impl EventLoop {
         'event_loop: loop {
             println!("Looper state {self:?}");
             let events = self.poller.poll()?;
+
+            println!("polled");
 
             for ev in events {
                 let descriptor = ev.u64;
@@ -72,7 +74,7 @@ impl EventLoop {
                         }
                     }
                 } else if self.clients.contains_key(&(descriptor as i32)) {
-                    // println!("Got event from client: {ev:?}");
+                    println!("Got event from client: {ev:?}");
 
                     if (EPOLLIN as u32) & ev.events != 0 {
                         println!("Socket {descriptor} available for read");
@@ -85,7 +87,7 @@ impl EventLoop {
                         let mut socket = &client.stream;
                         let buffer = &mut client.buffer;
 
-                        let to_echo = match socket.read(&mut buf) {
+                        let read_bytes = match socket.read(&mut buf) {
                             Err(err) => {
                                 let errmsg = format!("Could not read from socket, got error {err}");
                                 errmsg.into_bytes()
@@ -93,10 +95,19 @@ impl EventLoop {
                             Ok(read) => buf[..read].to_vec(),
                         };
 
-                        let msg = String::from_utf8(to_echo.clone()).unwrap();
-                        println!("received message {msg}");
-
-                        b"+PONG\r\n".iter().for_each(|b| buffer.push(b.clone()));
+                        match RespType::try_from(read_bytes)
+                            .map(Command::try_from)
+                            .flatten()
+                        {
+                            Ok(cmd) => {
+                                println!("received message {cmd:?}");
+                                b"+PONG\r\n".iter().for_each(|c| buffer.push(c.clone()));
+                            }
+                            Err(err) => {
+                                eprintln!("Read invalid RESP command, got error {err}");
+                                b"-Errore\r\n".iter().for_each(|c| buffer.push(c.clone()));
+                            }
+                        }
                     }
 
                     if (EPOLLOUT as u32) & ev.events != 0 {
@@ -107,15 +118,16 @@ impl EventLoop {
                             if let Err(err) = c.stream.write_all(&c.buffer) {
                                 match err.kind() {
                                     io::ErrorKind::WouldBlock => {
+                                        println!("would block")
                                         /* do nothing we'll come back next time */
                                     }
                                     _ => {
                                         return Err(err);
                                     }
                                 }
+                            } else {
+                                c.buffer.clear();
                             }
-                            
-                            c.buffer.clear();
                         }
                     }
 

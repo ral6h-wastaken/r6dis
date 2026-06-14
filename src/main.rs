@@ -9,6 +9,7 @@ use std::{
 mod ev_loop;
 mod poll;
 mod resp;
+mod command;
 
 use crate::poll::Poller;
 
@@ -24,7 +25,6 @@ fn main() -> std::io::Result<()> {
     })?;
 
     let poller = Poller::new(&listener)?;
-    // let looper = crate::ev_loop::EventLoop::new(listener, poller);
     let mut looper = crate::ev_loop::EventLoop::new(listener, poller);
 
     looper.run()
