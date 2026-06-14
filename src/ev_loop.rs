@@ -95,7 +95,7 @@ impl EventLoop {
                             Ok(read) => buf[..read].to_vec(),
                         };
 
-                        // println!("DEBUG: Read command {}", String::from_utf8(read_bytes.clone()).unwrap());
+                        println!("DEBUG: Read command {}", String::from_utf8(read_bytes.clone()).unwrap());
 
                         let response = match RespType::try_from(read_bytes.as_slice())
                             .and_then(Command::try_from)
