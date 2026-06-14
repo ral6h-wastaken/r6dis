@@ -11,6 +11,13 @@ impl Redis {
     }
 
     pub fn handle_command(&mut self, cmd: Command) -> Result<RespType, String> {
-        todo!()
+        match cmd {
+            Command::Ping => Ok(RespType::SimpleString {
+                content: "PONG".into(),
+            }),
+            Command::Echo { to_echo } => Ok(RespType::BulkString {
+                data: to_echo.into_bytes(),
+            }),
+        }
     }
 }

@@ -97,28 +97,27 @@ impl EventLoop {
                             Ok(read) => buf[..read].to_vec(),
                         };
 
-                        match RespType::try_from(read_bytes)
+                        let response = match RespType::try_from(read_bytes.as_slice())
                             .and_then(Command::try_from)
                         {
                             Ok(cmd) => {
                                 println!("received message {cmd:?}");
-                                let response = match self.redis.handle_command(cmd) {
+                                match self.redis.handle_command(cmd) {
                                     Ok(response) => response,
                                     Err(err) => RespType::SimpleError {
                                         content: format!("Error while handling command: {}", &err),
                                     },
-                                };
+                                }
                             }
                             Err(err) => {
                                 eprintln!("Read invalid RESP command, got error {err}");
                                 RespType::SimpleError {
-                                    content: "Invalid RESP command".into(),
+                                    content: "Invalid RESP command".into()
                                 }
-                                .serialize()
-                                .iter()
-                                .for_each(|c| buffer.push(*c));
                             }
-                        }
+                        };
+
+                        response.serialize().iter().for_each(|c| buffer.push(*c));
                     }
 
                     if (EPOLLOUT as u32) & ev.events != 0 {

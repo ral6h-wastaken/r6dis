@@ -14,10 +14,10 @@ pub enum RespType {
     NullBulkString,
 }
 
-impl TryFrom<Vec<u8>> for RespType {
+impl TryFrom<&[u8]> for RespType {
     type Error = io::Error;
 
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         let c = value.first().ok_or(io::Error::other("Empty value"))?;
 
         Ok(parse_single_value(&value, c, 0)?.0)
@@ -226,9 +226,9 @@ mod test {
             content: "ciao".into(),
         };
 
-        assert_eq!(expected, RespType::try_from(b"+ciao\r\n".to_vec()).unwrap());
+        assert_eq!(expected, RespType::try_from("+ciao\r\n".as_bytes()).unwrap());
 
-        let invalid_terminated = RespType::try_from(b"+ciao".to_vec());
+        let invalid_terminated = RespType::try_from("+ciao".as_bytes());
 
         assert!(invalid_terminated.is_err());
 
@@ -238,7 +238,7 @@ mod test {
             err.to_string()
         );
 
-        let invalid_content = RespType::try_from(b"+ci\rao\r\n".to_vec());
+        let invalid_content = RespType::try_from("+ci\rao\r\n".as_bytes());
 
         assert!(invalid_content.is_err());
 
@@ -248,7 +248,7 @@ mod test {
             err.to_string()
         );
 
-        let invalid_utf8 = RespType::try_from(b"+\xA4\r\n".to_vec());
+        let invalid_utf8 = RespType::try_from(b"+\xA4\r\n".as_slice());
 
         assert!(invalid_utf8.is_err());
 
@@ -274,9 +274,9 @@ mod test {
             content: "ciao".into(),
         };
 
-        assert_eq!(expected, RespType::try_from(b"-ciao\r\n".to_vec()).unwrap());
+        assert_eq!(expected, RespType::try_from("-ciao\r\n".as_bytes()).unwrap());
 
-        let invalid_terminated = RespType::try_from(b"-ciao".to_vec());
+        let invalid_terminated = RespType::try_from("-ciao".as_bytes());
 
         assert!(invalid_terminated.is_err());
 
@@ -286,7 +286,7 @@ mod test {
             err.to_string()
         );
 
-        let invalid_content = RespType::try_from(b"-ci\rao\r\n".to_vec());
+        let invalid_content = RespType::try_from("-ci\rao\r\n".as_bytes());
 
         assert!(invalid_content.is_err());
 
@@ -296,7 +296,7 @@ mod test {
             err.to_string()
         );
 
-        let invalid_utf8 = RespType::try_from(b"-\xA4\r\n".to_vec());
+        let invalid_utf8 = RespType::try_from(b"-\xA4\r\n".as_slice());
 
         assert!(invalid_utf8.is_err());
 
@@ -324,13 +324,13 @@ mod test {
 
         assert_eq!(
             non_null,
-            RespType::try_from(b"$4\r\nciao\r\n".to_vec()).unwrap()
+            RespType::try_from("$4\r\nciao\r\n".as_bytes()).unwrap()
         );
 
         let null = RespType::NullBulkString;
-        assert_eq!(null, RespType::try_from(b"$-1\r\n".to_vec()).unwrap());
+        assert_eq!(null, RespType::try_from("$-1\r\n".as_bytes()).unwrap());
 
-        let invalid_null = RespType::try_from(b"$-4\r\n".to_vec());
+        let invalid_null = RespType::try_from("$-4\r\n".as_bytes());
 
         assert!(invalid_null.is_err());
 
@@ -340,28 +340,28 @@ mod test {
             err.to_string()
         );
 
-        let invalid_len = RespType::try_from(b"$c\r\n".to_vec());
+        let invalid_len = RespType::try_from("$c\r\n".as_bytes());
 
         assert!(invalid_len.is_err());
 
         let err = invalid_len.err().unwrap();
         assert_eq!("Invalid bulk string length".to_string(), err.to_string());
 
-        let invalid_len = RespType::try_from(b"$12\r2\r\n".to_vec());
+        let invalid_len = RespType::try_from("$12\r2\r\n".as_bytes());
 
         assert!(invalid_len.is_err());
 
         let err = invalid_len.err().unwrap();
         assert_eq!("Invalid bulk string length".to_string(), err.to_string());
 
-        let invalid_len = RespType::try_from(b"$\r\nciao\r\n".to_vec());
+        let invalid_len = RespType::try_from("$\r\nciao\r\n".as_bytes());
 
         assert!(invalid_len.is_err());
 
         let err = invalid_len.err().unwrap();
         assert_eq!("Invalid bulk string length".to_string(), err.to_string());
 
-        let invalid_len = RespType::try_from(b"$12\r\nciao\r\n".to_vec());
+        let invalid_len = RespType::try_from("$12\r\nciao\r\n".as_bytes());
 
         assert!(invalid_len.is_err());
 
@@ -371,7 +371,7 @@ mod test {
             err.to_string()
         );
 
-        let invalid_end = RespType::try_from(b"$4\r\nciao".to_vec());
+        let invalid_end = RespType::try_from("$4\r\nciao".as_bytes());
 
         assert!(invalid_end.is_err());
 
@@ -407,21 +407,21 @@ mod test {
             ],
         };
 
-        let array_literal = b"*2\r\n+ciao\r\n$4\r\nciao\r\n";
+        let array_literal = "*2\r\n+ciao\r\n$4\r\nciao\r\n";
 
-        assert_eq!(array, RespType::try_from(array_literal.to_vec()).unwrap());
+        assert_eq!(array, RespType::try_from(array_literal.as_bytes()).unwrap());
 
         let empty = RespType::Array { elements: vec![] };
 
-        let empty_array_literal = b"*0\r\n";
+        let empty_array_literal = "*0\r\n";
 
         assert_eq!(
             empty,
-            RespType::try_from(empty_array_literal.to_vec()).unwrap()
+            RespType::try_from(empty_array_literal.as_bytes()).unwrap()
         );
 
-        let invalid_size = b"*3\r\n+ciao\r\n$4\r\nciao\r\n";
-        let error = RespType::try_from(invalid_size.to_vec());
+        let invalid_size = "*3\r\n+ciao\r\n$4\r\nciao\r\n";
+        let error = RespType::try_from(invalid_size.as_bytes());
 
         assert!(error.is_err());
 
