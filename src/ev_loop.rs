@@ -41,8 +41,6 @@ impl EventLoop {
             println!("Looper state {self:?}");
             let events = self.poller.poll()?;
 
-            println!("polled");
-
             for ev in events {
                 let descriptor = ev.u64;
 
@@ -97,6 +95,8 @@ impl EventLoop {
                             Ok(read) => buf[..read].to_vec(),
                         };
 
+                        // println!("DEBUG: Read command {}", String::from_utf8(read_bytes.clone()).unwrap());
+
                         let response = match RespType::try_from(read_bytes.as_slice())
                             .and_then(Command::try_from)
                         {
@@ -110,9 +110,9 @@ impl EventLoop {
                                 }
                             }
                             Err(err) => {
-                                eprintln!("Read invalid RESP command, got error {err}");
+                                let msg = format!("Invalid RESP command, got error {err}");
                                 RespType::SimpleError {
-                                    content: "Invalid RESP command".into()
+                                    content: msg
                                 }
                             }
                         };
