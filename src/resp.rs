@@ -1,4 +1,4 @@
-use std::{io, str::FromStr};
+use std::{fmt::Display, io, str::FromStr};
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum RespType {
@@ -6,9 +6,29 @@ pub enum RespType {
     Array { elements: Vec<RespType> },
     //+<content>\r\n
     SimpleString { content: String },
+    //-<content>\r\n
+    SimpleError { content: String },
     //$<length>\r\n<data>\r\n
     BulkString { data: Vec<u8> },
     NullBulkString,
+}
+
+enum SimpleDataType {
+    String,
+    Error,
+}
+
+impl Display for &SimpleDataType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                SimpleDataType::String => "string",
+                SimpleDataType::Error => "error",
+            }
+        )
+    }
 }
 
 impl TryFrom<Vec<u8>> for RespType {
@@ -26,6 +46,7 @@ impl TryFrom<Vec<u8>> for RespType {
 fn parse_single_value(value: &[u8], c: &u8, cursor: usize) -> Result<(RespType, usize), io::Error> {
     Ok(match c {
         b'+' => parse_simple_string(&value, cursor + 1)?,
+        b'-' => parse_simple_error(&value, cursor + 1)?,
         b'$' => parse_bulk_string(&value, cursor + 1)?,
         b'*' => parse_array(&value, cursor + 1)?,
         _ => todo!("Unsupported prefix {c}"),
@@ -111,9 +132,21 @@ fn parse_bulk_string(value: &[u8], cursor: usize) -> Result<(RespType, usize), i
 }
 
 fn parse_simple_string(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Error> {
+    parse_simple_data(value, cursor, SimpleDataType::String)
+}
+
+fn parse_simple_error(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Error> {
+    parse_simple_data(value, cursor, SimpleDataType::Error)
+}
+
+fn parse_simple_data(
+    value: &[u8],
+    cursor: usize,
+    data_type: SimpleDataType,
+) -> Result<(RespType, usize), io::Error> {
     let end_idx = find_separator_index(value, cursor).ok_or(io::Error::new(
         io::ErrorKind::Other,
-        "Simple string must end with \\r\\n",
+        format!("Simple {} must end with \\r\\n", &data_type),
     ))?;
 
     let value = &value[cursor..end_idx];
@@ -121,15 +154,20 @@ fn parse_simple_string(value: &[u8], cursor: usize) -> Result<(RespType, usize),
     if value.contains(&b'\r') || value.contains(&b'\n') {
         return Err(io::Error::new(
             io::ErrorKind::Other,
-            "Simple string must not contain either \\r or \\n",
+            format!("Simple {} must not contain either \\r or \\n", &data_type),
         ));
     }
 
-    match String::from_utf8(value.to_vec()) {
-        Ok(content) => Ok((RespType::SimpleString { content }, end_idx + 2)),
-        Err(_) => Err(io::Error::new(
+    match (String::from_utf8(value.to_vec()), &data_type) {
+        (Ok(content), SimpleDataType::String) => {
+            Ok((RespType::SimpleString { content }, end_idx + 2))
+        }
+        (Ok(content), SimpleDataType::Error) => {
+            Ok((RespType::SimpleError { content }, end_idx + 2))
+        }
+        (Err(_), _) => Err(io::Error::new(
             io::ErrorKind::Other,
-            "Simple string must be a valid utf8 encoded string",
+            format!("Simple {} must be a valid utf8 encoded string", &data_type),
         )),
     }
 }
@@ -181,6 +219,45 @@ mod test {
         let err = invalid_utf8.err().unwrap();
         assert_eq!(
             "Simple string must be a valid utf8 encoded string".to_string(),
+            err.to_string()
+        );
+    }
+
+    #[test]
+    fn resptype_parse_simpleerr() {
+        let expected = RespType::SimpleError {
+            content: "ciao".into(),
+        };
+
+        assert_eq!(expected, RespType::try_from(b"-ciao\r\n".to_vec()).unwrap());
+
+        let invalid_terminated = RespType::try_from(b"-ciao".to_vec());
+
+        assert!(invalid_terminated.is_err());
+
+        let err = invalid_terminated.err().unwrap();
+        assert_eq!(
+            "Simple error must end with \\r\\n".to_string(),
+            err.to_string()
+        );
+
+        let invalid_content = RespType::try_from(b"-ci\rao\r\n".to_vec());
+
+        assert!(invalid_content.is_err());
+
+        let err = invalid_content.err().unwrap();
+        assert_eq!(
+            "Simple error must not contain either \\r or \\n".to_string(),
+            err.to_string()
+        );
+
+        let invalid_utf8 = RespType::try_from(b"-\xA4\r\n".to_vec());
+
+        assert!(invalid_utf8.is_err());
+
+        let err = invalid_utf8.err().unwrap();
+        assert_eq!(
+            "Simple error must be a valid utf8 encoded string".to_string(),
             err.to_string()
         );
     }
