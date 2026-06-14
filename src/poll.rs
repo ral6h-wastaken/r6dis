@@ -1,5 +1,8 @@
 use std::{
-    collections::HashSet, io::{self, Error, ErrorKind}, net::{TcpListener, TcpStream}, os::fd::AsRawFd
+    io,
+    collections::HashSet,
+    net::{TcpListener, TcpStream},
+    os::fd::AsRawFd,
 };
 
 use libc::*;
@@ -29,7 +32,7 @@ impl Poller {
                 u64: listener_fd as u64,
             };
 
-            let res = epoll_ctl(epfd, EPOLL_CTL_ADD, listener_fd as i32, &mut event);
+            let res = epoll_ctl(epfd, EPOLL_CTL_ADD, listener_fd, &mut event);
             if res == -1 {
                 eprintln!("Error while registering listener file descriptor for polling");
                 return Err(std::io::Error::last_os_error());
@@ -40,30 +43,24 @@ impl Poller {
         let mut watched = HashSet::new();
         watched.insert(listener_fd);
 
-        Ok(Self {
-            epoll_fd,
-            watched
-        })
+        Ok(Self { epoll_fd, watched })
     }
 
     pub fn watch_socket(&mut self, to_watch: &TcpStream) -> io::Result<()> {
         let to_watch_fd = to_watch.as_raw_fd();
         let inserted = self.watched.insert(to_watch_fd);
         if !inserted {
-            return Err(io::Error::new(
-                ErrorKind::Other,
-                "TcpStream is already being watched",
-            ));
+            return Err(io::Error::other("TcpStream is already being watched"));
         }
 
         let mut event = epoll_event {
             events: (EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET) as u32, //EPOLLHUP and EPOLLERR are always
-                                                              //automatically reported
+            //automatically reported
             u64: to_watch_fd as u64,
         };
 
         unsafe {
-            let res = epoll_ctl(self.epoll_fd as i32, EPOLL_CTL_ADD, to_watch_fd, &mut event);
+            let res = epoll_ctl(self.epoll_fd, EPOLL_CTL_ADD, to_watch_fd, &mut event);
             if res < 0 {
                 let err = io::Error::last_os_error();
                 return Err(err);
@@ -78,8 +75,7 @@ impl Poller {
 
         let removed = self.watched.remove(&to_remove_fd);
         if !removed {
-            return Err(io::Error::new(
-                ErrorKind::Other,
+            return Err(io::Error::other(
                 "Trying to remove non currently watched file",
             ));
         }
@@ -91,7 +87,7 @@ impl Poller {
 
         unsafe {
             let res = epoll_ctl(
-                self.epoll_fd as i32,
+                self.epoll_fd,
                 EPOLL_CTL_DEL,
                 to_remove_fd,
                 &mut ignored,
@@ -111,7 +107,7 @@ impl Poller {
 
         let n = unsafe {
             let n = epoll_wait(
-                self.epoll_fd as i32,
+                self.epoll_fd,
                 events.as_mut_ptr(),
                 events.len() as i32,
                 -1,
@@ -133,4 +129,3 @@ impl Poller {
         Ok(events[..n as usize].to_vec())
     }
 }
-

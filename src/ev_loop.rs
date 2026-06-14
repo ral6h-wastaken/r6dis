@@ -7,7 +7,7 @@ use std::{
 
 use libc::{EPOLLERR, EPOLLHUP, EPOLLIN, EPOLLOUT, EPOLLRDHUP};
 
-use crate::{command::Command, poll::Poller, resp::RespType};
+use crate::{command::Command, poll::Poller, redis::Redis, resp::RespType};
 
 #[derive(Debug)]
 struct Client {
@@ -17,6 +17,7 @@ struct Client {
 
 #[derive(Debug)]
 pub struct EventLoop {
+    redis: Redis,
     listener: TcpListener,
     clients: HashMap<i32, Client>,
     poller: Poller,
@@ -25,6 +26,7 @@ pub struct EventLoop {
 impl EventLoop {
     pub fn new(listener: TcpListener, poller: Poller) -> Self {
         Self {
+            redis: Redis::new(),
             listener,
             poller,
             clients: HashMap::new(),
@@ -96,16 +98,25 @@ impl EventLoop {
                         };
 
                         match RespType::try_from(read_bytes)
-                            .map(Command::try_from)
-                            .flatten()
+                            .and_then(Command::try_from)
                         {
                             Ok(cmd) => {
                                 println!("received message {cmd:?}");
-                                b"+PONG\r\n".iter().for_each(|c| buffer.push(c.clone()));
+                                let response = match self.redis.handle_command(cmd) {
+                                    Ok(response) => response,
+                                    Err(err) => RespType::SimpleError {
+                                        content: format!("Error while handling command: {}", &err),
+                                    },
+                                };
                             }
                             Err(err) => {
                                 eprintln!("Read invalid RESP command, got error {err}");
-                                b"-Errore\r\n".iter().for_each(|c| buffer.push(c.clone()));
+                                RespType::SimpleError {
+                                    content: "Invalid RESP command".into(),
+                                }
+                                .serialize()
+                                .iter()
+                                .for_each(|c| buffer.push(*c));
                             }
                         }
                     }

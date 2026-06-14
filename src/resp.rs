@@ -18,16 +18,14 @@ impl TryFrom<Vec<u8>> for RespType {
     type Error = io::Error;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        let c = value
-            .first()
-            .ok_or(io::Error::new(io::ErrorKind::Other, "Empty value"))?;
+        let c = value.first().ok_or(io::Error::other("Empty value"))?;
 
         Ok(parse_single_value(&value, c, 0)?.0)
     }
 }
 
 impl RespType {
-    fn serialize(&self) -> Vec<u8> {
+    pub fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::<u8>::new();
 
         match self {
@@ -39,8 +37,7 @@ impl RespType {
 
                 elements
                     .iter()
-                    .map(|el| el.serialize())
-                    .flatten()
+                    .flat_map(|el| el.serialize())
                     .for_each(|e| result.push(e));
             }
             RespType::SimpleString { content } => {
@@ -54,7 +51,7 @@ impl RespType {
                     .as_bytes()
                     .iter()
                     .for_each(|c| result.push(*c));
-            },
+            }
             RespType::BulkString { data } => {
                 format!("${}\r\n", data.len())
                     .as_bytes()
@@ -64,8 +61,8 @@ impl RespType {
                 data.iter().for_each(|c| result.push(*c));
 
                 b"\r\n".iter().for_each(|c| result.push(*c));
-            },
-            RespType::NullBulkString => b"$-1\r\n".iter().for_each(|c| result.push(*c))
+            }
+            RespType::NullBulkString => b"$-1\r\n".iter().for_each(|c| result.push(*c)),
         };
 
         result
@@ -74,25 +71,25 @@ impl RespType {
 
 fn parse_single_value(value: &[u8], c: &u8, cursor: usize) -> Result<(RespType, usize), io::Error> {
     Ok(match c {
-        b'+' => parse_simple_string(&value, cursor + 1)?,
-        b'-' => parse_simple_error(&value, cursor + 1)?,
-        b'$' => parse_bulk_string(&value, cursor + 1)?,
-        b'*' => parse_array(&value, cursor + 1)?,
+        b'+' => parse_simple_string(value, cursor + 1)?,
+        b'-' => parse_simple_error(value, cursor + 1)?,
+        b'$' => parse_bulk_string(value, cursor + 1)?,
+        b'*' => parse_array(value, cursor + 1)?,
         _ => todo!("Unsupported prefix {c}"),
     })
 }
 
 fn parse_array(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Error> {
     //*<number-of-elements>\r\n<element-1>...<element-n>
-    let sep_idx = find_separator_index(value, cursor)
-        .ok_or(io::Error::new(io::ErrorKind::Other, "Invalid array size"))?;
+    let sep_idx =
+        find_separator_index(value, cursor).ok_or(io::Error::other("Invalid array size"))?;
 
     let size = usize::from_str(
         String::from_utf8(value[cursor..sep_idx].to_vec())
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid array size"))?
+            .map_err(|_| io::Error::other("Invalid array size"))?
             .as_str(),
     )
-    .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid array size"))?;
+    .map_err(|_| io::Error::other("Invalid array size"))?;
 
     let mut cursor = sep_idx + 2;
     let mut elements: Vec<RespType> = Vec::with_capacity(size);
@@ -104,8 +101,7 @@ fn parse_array(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Err
     }
 
     if size != elements.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
+        return Err(io::Error::other(
             "Array declared size does not match actual size",
         ));
     }
@@ -114,30 +110,25 @@ fn parse_array(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Err
 }
 
 fn parse_bulk_string(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Error> {
-    let sep_idx = find_separator_index(value, cursor).ok_or(io::Error::new(
-        io::ErrorKind::Other,
-        "Invalid bulk string length",
-    ))?;
+    let sep_idx = find_separator_index(value, cursor)
+        .ok_or(io::Error::other("Invalid bulk string length"))?;
 
     let length = isize::from_str(
         String::from_utf8(value[cursor..sep_idx].to_vec())
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid bulk string length"))?
+            .map_err(|_| io::Error::other("Invalid bulk string length"))?
             .as_str(),
     )
-    .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid bulk string length"))?;
+    .map_err(|_| io::Error::other("Invalid bulk string length"))?;
 
     if length >= 0 {
         let length = length as usize;
         let cursor = sep_idx + 2;
 
-        let sep_idx = find_separator_index(value, cursor).ok_or(io::Error::new(
-            io::ErrorKind::Other,
-            "Bulk strings must end with \\r\\n",
-        ))?;
+        let sep_idx = find_separator_index(value, cursor)
+            .ok_or(io::Error::other("Bulk strings must end with \\r\\n"))?;
 
         if (cursor + length) != sep_idx {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "Bulk string declared length does not match actual length",
             ));
         }
@@ -150,10 +141,7 @@ fn parse_bulk_string(value: &[u8], cursor: usize) -> Result<(RespType, usize), i
         ))
     } else {
         if length != -1 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Only null bulk strings can start with -",
-            ));
+            return Err(io::Error::other("Only null bulk strings can start with -"));
         }
 
         Ok((RespType::NullBulkString, sep_idx + 2))
@@ -173,18 +161,18 @@ fn parse_simple_data(
     cursor: usize,
     data_type: SimpleDataType,
 ) -> Result<(RespType, usize), io::Error> {
-    let end_idx = find_separator_index(value, cursor).ok_or(io::Error::new(
-        io::ErrorKind::Other,
-        format!("Simple {} must end with \\r\\n", &data_type),
-    ))?;
+    let end_idx = find_separator_index(value, cursor).ok_or(io::Error::other(format!(
+        "Simple {} must end with \\r\\n",
+        &data_type
+    )))?;
 
     let value = &value[cursor..end_idx];
 
     if value.contains(&b'\r') || value.contains(&b'\n') {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("Simple {} must not contain either \\r or \\n", &data_type),
-        ));
+        return Err(io::Error::other(format!(
+            "Simple {} must not contain either \\r or \\n",
+            &data_type
+        )));
     }
 
     match (String::from_utf8(value.to_vec()), &data_type) {
@@ -194,10 +182,10 @@ fn parse_simple_data(
         (Ok(content), SimpleDataType::Error) => {
             Ok((RespType::SimpleError { content }, end_idx + 2))
         }
-        (Err(_), _) => Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("Simple {} must be a valid utf8 encoded string", &data_type),
-        )),
+        (Err(_), _) => Err(io::Error::other(format!(
+            "Simple {} must be a valid utf8 encoded string",
+            &data_type
+        ))),
     }
 }
 
@@ -231,7 +219,6 @@ impl Display for &SimpleDataType {
 #[cfg(test)]
 mod test {
     use crate::resp::RespType;
-    use std::io;
 
     #[test]
     fn resptype_parse_simplestring() {
@@ -401,16 +388,10 @@ mod test {
             data: b"ciao".to_vec(),
         };
 
-        assert_eq!(
-            non_null.serialize(),
-            b"$4\r\nciao\r\n"
-        );
+        assert_eq!(non_null.serialize(), b"$4\r\nciao\r\n");
 
         let null = RespType::NullBulkString;
-        assert_eq!(
-            null.serialize(),
-            b"$-1\r\n"
-        );
+        assert_eq!(null.serialize(), b"$-1\r\n");
     }
 
     #[test]
@@ -471,9 +452,6 @@ mod test {
         let empty = RespType::Array { elements: vec![] };
         let empty_array_literal = b"*0\r\n";
 
-        assert_eq!(
-            empty.serialize(),
-            empty_array_literal
-        );
+        assert_eq!(empty.serialize(), empty_array_literal);
     }
 }
