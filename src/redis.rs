@@ -57,16 +57,147 @@ impl Redis {
                 }),
                 None => Ok(RespType::NullBulkString),
             },
-            Command::Rpush { key, mut elements } => {
-                let entry = self.list_store
+            Command::RPush { key, mut elements } => {
+                let entry = self
+                    .list_store
                     .entry(key)
                     .and_modify(|l| l.append(&mut elements))
                     .or_insert(elements);
 
                 Ok(RespType::Integer {
-                    integer: entry.len() as i64
+                    integer: entry.len() as i64,
                 })
             }
+            Command::LRange { key, start, stop } => {
+                // Out of range indexes will not produce an error.
+                // If start is larger than the end of the list, an empty list is returned.
+                // If stop is larger than the actual end of the list, Redis will treat it like the last element of the list.
+                match self.list_store.get(&key) {
+                    Some(list) if !list.is_empty() => {
+                        let compute_real_index = |idx: i64| -> usize {
+                            if idx < 0 {
+                                (list.len() as i64).saturating_add(idx).max(0) as usize
+                            } else {
+                                idx as usize
+                            }
+                        };
+
+                        let start = compute_real_index(start);
+                        let stop = compute_real_index(stop).min(list.len().saturating_sub(1));
+
+                        let elements = if start > stop {
+                            vec![]
+                        } else {
+                            list[start..=stop]
+                                .iter()
+                                .map(|val| RespType::BulkString {
+                                    data: val.as_bytes().to_vec(),
+                                })
+                                .collect()
+                        };
+
+                        Ok(RespType::Array { elements })
+                    }
+                    _ => Ok(RespType::Array { elements: vec![] }),
+                }
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{command::Command, resp::RespType};
+
+    #[test]
+    fn test_handle_lrange() {
+        let mut rds = super::Redis::new();
+
+        let key = String::from("test key");
+
+        let rpush_cmd = crate::command::Command::RPush {
+            key: key.clone(),
+            elements: vec![
+                String::from("first"),
+                String::from("second"),
+                String::from("third"),
+                String::from("fourth"),
+                String::from("fifth"),
+            ],
+        };
+
+        let sz = rds.handle_command(rpush_cmd).unwrap();
+        assert_eq!(sz, RespType::Integer { integer: 5 });
+
+        //test stop > len
+        let lrange_cmd = Command::LRange {
+            key: key.clone(),
+            start: 0,
+            stop: 1234,
+        };
+        let res = rds.handle_command(lrange_cmd);
+        let expected = RespType::Array {
+            elements: vec![
+                RespType::BulkString {
+                    data: String::from("first").into_bytes(),
+                },
+                RespType::BulkString {
+                    data: String::from("second").into_bytes(),
+                },
+                RespType::BulkString {
+                    data: String::from("third").into_bytes(),
+                },
+                RespType::BulkString {
+                    data: String::from("fourth").into_bytes(),
+                },
+                RespType::BulkString {
+                    data: String::from("fifth").into_bytes(),
+                },
+            ],
+        };
+
+        assert!(res.is_ok_and(|val| {
+            assert_eq!(val, expected);
+            return true;
+        }));
+
+        //negative start and stop, non empty
+        let lrange_cmd = Command::LRange {
+            key: key.clone(),
+            start: -3,
+            stop: -1,
+        };
+        let res = rds.handle_command(lrange_cmd);
+        let expected = RespType::Array {
+            elements: vec![
+                RespType::BulkString {
+                    data: String::from("third").into_bytes(),
+                },
+                RespType::BulkString {
+                    data: String::from("fourth").into_bytes(),
+                },
+                RespType::BulkString {
+                    data: String::from("fifth").into_bytes(),
+                },
+            ],
+        };
+
+        assert!(res.is_ok_and(|val| {
+            assert_eq!(val, expected);
+            return true;
+        }));
+
+        let lrange_cmd = Command::LRange {
+            key: key.clone(),
+            start: -1,
+            stop: -2,
+        };
+        let res = rds.handle_command(lrange_cmd);
+        let expected = RespType::Array { elements: vec![] };
+
+        assert!(res.is_ok_and(|val| {
+            assert_eq!(val, expected);
+            return true;
+        }));
     }
 }

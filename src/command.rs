@@ -17,9 +17,14 @@ pub enum Command {
     Get {
         key: String,
     },
-    Rpush {
+    RPush {
         key: String,
         elements: Vec<String>,
+    },
+    LRange {
+        key: String,
+        start: i64,
+        stop: i64,
     },
 }
 
@@ -55,6 +60,7 @@ impl TryFrom<resp::RespType> for Command {
                             "SET" => parse_set_cmd(&elements),
                             "GET" => parse_get_cmd(&elements),
                             "RPUSH" => parse_rpush_cmd(&elements),
+                            "LRANGE" => parse_lrange_cmd(&elements),
                             _ => Err(io::Error::other("NYI")),
                         }
                     }
@@ -64,6 +70,45 @@ impl TryFrom<resp::RespType> for Command {
             _ => Err(io::Error::other("Redis Commands should be RESP arrays")),
         }
     }
+}
+
+fn parse_lrange_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
+    let key = elements
+        .get(1)
+        .and_then(|k| match k {
+            RespType::BulkString { data } => Some(data),
+            _ => None,
+        })
+        .and_then(|utf8| String::from_utf8(utf8.clone()).ok())
+        .ok_or(io::Error::other(
+            "Invalid LRANGE command: absent or invalid key",
+        ))?;
+
+    let start = elements
+        .get(2)
+        .and_then(|k| match k {
+            RespType::BulkString { data } => Some(data),
+            _ => None,
+        })
+        .and_then(|utf8| String::from_utf8(utf8.clone()).ok())
+        .and_then(|str_start| str_start.parse::<i64>().ok())
+        .ok_or(io::Error::other(
+            "Invalid LRANGE command: absent or invalid start",
+        ))?;
+
+    let stop = elements
+        .get(3)
+        .and_then(|k| match k {
+            RespType::BulkString { data } => Some(data),
+            _ => None,
+        })
+        .and_then(|utf8| String::from_utf8(utf8.clone()).ok())
+        .and_then(|str_stop| str_stop.parse::<i64>().ok())
+        .ok_or(io::Error::other(
+            "Invalid LRANGE command: absent or invalid stop",
+        ))?;
+
+    Ok(Command::LRange { key, start, stop })
 }
 
 fn parse_rpush_cmd(raw_elements: &[RespType]) -> Result<Command, io::Error> {
@@ -99,7 +144,7 @@ fn parse_rpush_cmd(raw_elements: &[RespType]) -> Result<Command, io::Error> {
         elements.push(elem);
     }
 
-    Ok(Command::Rpush { key, elements })
+    Ok(Command::RPush { key, elements })
 }
 
 fn parse_echo_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
