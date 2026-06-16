@@ -73,9 +73,7 @@ impl Redis {
                     .list_store
                     .entry(key)
                     .and_modify(|l| {
-                        elements
-                            .iter()
-                            .for_each(|el| l.insert(0, el.clone()));
+                        elements.iter().for_each(|el| l.insert(0, el.clone()));
                     })
                     .or_insert(elements.into_iter().rev().collect());
 
@@ -84,21 +82,38 @@ impl Redis {
                 })
             }
             Command::LLen { key } => {
-                let len = self.list_store.get(&key)
-                    .map_or(0, |l| l.len());
+                let len = self.list_store.get(&key).map_or(0, |l| l.len());
 
                 Ok(RespType::Integer {
                     integer: len as i64,
                 })
             }
-            Command::LPop { key } => {
-                match self.list_store.get_mut(&key)
+            Command::LPop { key, count } => {
+                let mut pop_list = Vec::<String>::with_capacity(count);
+
+                while let Some(list) = self
+                    .list_store
+                    .get_mut(&key)
                     .filter(|v| !v.is_empty())
-                    .map(|v| v.remove(0))
-                    .map(|popped| RespType::BulkString { data: popped.as_bytes().to_vec() }) {
-                        Some(bk) => Ok(bk),
-                        None => Ok(RespType::NullBulkString)
-                    }
+                    && pop_list.len() < count
+                {
+                    pop_list.push(list.remove(0));
+                }
+
+                match pop_list.len() {
+                    0 => Ok(RespType::NullBulkString),
+                    1 => Ok(RespType::BulkString {
+                        data: pop_list[0].as_bytes().to_vec(),
+                    }),
+                    _ => Ok(RespType::Array {
+                        elements: pop_list
+                            .iter()
+                            .map(|popped| RespType::BulkString {
+                                data: popped.as_bytes().to_vec(),
+                            })
+                            .collect(),
+                    }),
+                }
             }
             Command::LRange { key, start, stop } => {
                 // Out of range indexes will not produce an error.

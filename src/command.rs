@@ -35,6 +35,7 @@ pub enum Command {
     },
     LPop {
         key: String,
+        count: usize
     },
 }
 
@@ -97,7 +98,20 @@ fn parse_lpop_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
             "Invalid LPOP command: absent or invalid key",
         ))?;
 
-    Ok(Command::LPop { key })
+    let count = elements
+        .get(2)
+        .and_then(|k| match k {
+            RespType::BulkString { data } => Some(data),
+            _ => None,
+        })
+        .and_then(|utf8| String::from_utf8(utf8.clone()).ok())
+        .and_then(|str_repr| str_repr.parse::<usize>().ok())
+        .ok_or(io::Error::other(
+            "Invalid LPOP command: value is not valid utf8 or out of range, must be positive",
+        ))?;
+
+
+    Ok(Command::LPop { key, count})
 }
 
 fn parse_llen_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
