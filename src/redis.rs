@@ -10,9 +10,13 @@ pub struct Redis {
 }
 
 #[derive(Debug)]
+#[allow(unused)]
+//TODO [LS]: remove the allow once we use the failure error
 pub enum RedisError {
     Failure(String),
-    WouldBlock { timeout: Option<time::Duration> },
+    WouldBlock {
+        timeout: Option<time::Duration> 
+    },
 }
 
 #[derive(Debug)]
@@ -151,7 +155,10 @@ impl Redis {
                     _ => Ok(RespType::Array { elements: vec![] }),
                 }
             }
-            Command::BlPop { key, timeout } => todo!(),
+            Command::BlPop { key: _, timeout } => {
+                //TODO [LS] implement
+                Err(RedisError::WouldBlock { timeout })
+            }
             Command::ErrorCmd { msg } => Ok(RespType::SimpleError { content: msg }),
         }
     }

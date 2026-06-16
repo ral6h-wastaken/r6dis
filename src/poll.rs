@@ -54,7 +54,7 @@ impl Poller {
         }
 
         let mut event = epoll_event {
-            events: (EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET) as u32, //EPOLLHUP and EPOLLERR are always
+            events: (EPOLLIN | EPOLLOUT | EPOLLRDHUP) as u32, //EPOLLHUP and EPOLLERR are always
             //automatically reported
             u64: to_watch_fd as u64,
         };
@@ -102,7 +102,7 @@ impl Poller {
     }
 
     //SAFETY the epoll file descriptor is encapsulated by the Poller struct and the events buffer is created inside this method and not taken as an argument
-    pub fn poll(&self) -> io::Result<Vec<epoll_event>> {
+    pub fn poll(&self, timeout_ms: i32) -> io::Result<Vec<epoll_event>> {
         let mut events = vec![epoll_event { events: 0, u64: 0 }; 128];
 
         let n = unsafe {
@@ -110,7 +110,7 @@ impl Poller {
                 self.epoll_fd,
                 events.as_mut_ptr(),
                 events.len() as i32,
-                -1,
+                timeout_ms,
             );
 
             if n < 0 {

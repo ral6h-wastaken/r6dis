@@ -1,23 +1,14 @@
 use std::{
     io::{self, Read as _, Write as _},
     net::TcpStream,
-    time,
 };
 
-use crate::redis::RedisError;
+use crate::resp::RespType;
 
 #[derive(Debug)]
 pub(super) struct Client {
     stream: TcpStream,
     buffer: Vec<u8>,
-    state: ClientState,
-}
-
-#[derive(Debug)]
-enum ClientState {
-    Ready,
-    Wait,
-    TimedWait(time::Instant),
 }
 
 impl Client {
@@ -25,7 +16,6 @@ impl Client {
         Self {
             stream,
             buffer: vec![],
-            state: ClientState::Ready,
         }
     }
 
@@ -41,11 +31,8 @@ impl Client {
         }
     }
 
-    pub(crate) fn step(&mut self, outcome: Result<crate::resp::RespType, RedisError>) {
-        match outcome {
-            Ok(response) => self.buffer.append(&mut response.serialize()),
-            Err(_) => todo!(),
-        }
+    pub(crate) fn send(&mut self, response: RespType) {
+        self.buffer.append(&mut response.serialize());
     }
 
     pub(crate) fn flush(&mut self) -> Result<(), io::Error> {
