@@ -21,6 +21,10 @@ pub enum Command {
         key: String,
         elements: Vec<String>,
     },
+    LPush {
+        key: String,
+        elements: Vec<String>,
+    },
     LRange {
         key: String,
         start: i64,
@@ -60,6 +64,7 @@ impl TryFrom<resp::RespType> for Command {
                             "SET" => parse_set_cmd(&elements),
                             "GET" => parse_get_cmd(&elements),
                             "RPUSH" => parse_rpush_cmd(&elements),
+                            "LPUSH" => parse_lpush_cmd(&elements),
                             "LRANGE" => parse_lrange_cmd(&elements),
                             _ => Err(io::Error::other("NYI")),
                         }
@@ -111,7 +116,20 @@ fn parse_lrange_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
     Ok(Command::LRange { key, start, stop })
 }
 
+enum PushKind {
+    Left,
+    Rigth,
+}
+
 fn parse_rpush_cmd(raw_elements: &[RespType]) -> Result<Command, io::Error> {
+    parse_push_cmd(raw_elements, PushKind::Rigth)
+}
+
+fn parse_lpush_cmd(raw_elements: &[RespType]) -> Result<Command, io::Error> {
+    parse_push_cmd(raw_elements, PushKind::Left)
+}
+
+fn parse_push_cmd(raw_elements: &[RespType], kind: PushKind) -> Result<Command, io::Error> {
     if raw_elements.len() < 3 {
         return Err(io::Error::other(
             "Invalid RPUSH command: absent or invalid key",
@@ -144,7 +162,10 @@ fn parse_rpush_cmd(raw_elements: &[RespType]) -> Result<Command, io::Error> {
         elements.push(elem);
     }
 
-    Ok(Command::RPush { key, elements })
+    match kind {
+        PushKind::Left => Ok(Command::LPush { key, elements }),
+        PushKind::Rigth => Ok(Command::RPush { key, elements }),
+    }
 }
 
 fn parse_echo_cmd(elements: &[RespType]) -> Result<Command, io::Error> {

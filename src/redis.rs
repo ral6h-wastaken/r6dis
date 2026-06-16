@@ -68,6 +68,22 @@ impl Redis {
                     integer: entry.len() as i64,
                 })
             }
+            Command::LPush { key, elements } => {
+                let entry = self
+                    .list_store
+                    .entry(key)
+                    .and_modify(|l| {
+                        elements
+                            .iter()
+                            .inspect(|el| println!("inserting {el}"))
+                            .for_each(|el| l.insert(0, el.clone()));
+                    })
+                    .or_insert(elements.into_iter().rev().collect());
+
+                Ok(RespType::Integer {
+                    integer: entry.len() as i64,
+                })
+            }
             Command::LRange { key, start, stop } => {
                 // Out of range indexes will not produce an error.
                 // If start is larger than the end of the list, an empty list is returned.
