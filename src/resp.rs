@@ -10,6 +10,8 @@ pub enum RespType {
     SimpleError { content: String },
     //$<length>\r\n<data>\r\n
     BulkString { data: Vec<u8> },
+    //:[<+|->]<value>\r\n
+    Integer { integer: i64 },
     //$-1\r\n
     NullBulkString,
 }
@@ -62,6 +64,12 @@ impl RespType {
 
                 b"\r\n".iter().for_each(|c| result.push(*c));
             }
+            RespType::Integer { integer } => {
+                format!(":{}\r\n", integer)
+                    .as_bytes()
+                    .iter()
+                    .for_each(|c| result.push(*c));
+            }
             RespType::NullBulkString => b"$-1\r\n".iter().for_each(|c| result.push(*c)),
         };
 
@@ -72,11 +80,16 @@ impl RespType {
 fn parse_single_value(value: &[u8], c: &u8, cursor: usize) -> Result<(RespType, usize), io::Error> {
     Ok(match c {
         b'+' => parse_simple_string(value, cursor + 1)?,
+        b':' => parse_integer(value, cursor + 1)?,
         b'-' => parse_simple_error(value, cursor + 1)?,
         b'$' => parse_bulk_string(value, cursor + 1)?,
         b'*' => parse_array(value, cursor + 1)?,
         _ => todo!("Unsupported prefix {c}"),
     })
+}
+
+fn parse_integer(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Error> {
+    parse_simple_data(value, cursor, SimpleDataType::Integer)
 }
 
 fn parse_array(value: &[u8], cursor: usize) -> Result<(RespType, usize), io::Error> {
@@ -182,6 +195,13 @@ fn parse_simple_data(
         (Ok(content), SimpleDataType::Error) => {
             Ok((RespType::SimpleError { content }, end_idx + 2))
         }
+        (Ok(content), SimpleDataType::Integer) => {
+            let integer = content
+                .parse::<i64>()
+                .map_err(|err| io::Error::other(format!("invalid integer value: {err}")))?;
+
+            Ok((RespType::Integer { integer }, end_idx + 2))
+        }
         (Err(_), _) => Err(io::Error::other(format!(
             "Simple {} must be a valid utf8 encoded string",
             &data_type
@@ -196,9 +216,8 @@ fn find_separator_index(value: &[u8], cursor: usize) -> Option<usize> {
         .map(|i| cursor + i)
 }
 
-//
-
 enum SimpleDataType {
+    Integer,
     String,
     Error,
 }
@@ -211,6 +230,7 @@ impl Display for &SimpleDataType {
             match self {
                 SimpleDataType::String => "string",
                 SimpleDataType::Error => "error",
+                SimpleDataType::Integer => "integer",
             }
         )
     }
@@ -221,12 +241,71 @@ mod test {
     use crate::resp::RespType;
 
     #[test]
+    fn resptype_parse_integer() {
+        let expected = RespType::Integer { integer: 69420 };
+
+        assert_eq!(
+            expected,
+            RespType::try_from(":+69420\r\n".as_bytes()).unwrap()
+        );
+
+        let expected = RespType::Integer { integer: -69420 };
+
+        assert_eq!(
+            expected,
+            RespType::try_from(":-69420\r\n".as_bytes()).unwrap()
+        );
+
+        let invalid_terminated = RespType::try_from(":12".as_bytes());
+
+        assert!(invalid_terminated.is_err());
+
+        let err = invalid_terminated.err().unwrap();
+        assert_eq!(
+            "Simple integer must end with \\r\\n".to_string(),
+            err.to_string()
+        );
+
+        let invalid_content = RespType::try_from(":ci\rao\r\n".as_bytes());
+
+        assert!(invalid_content.is_err());
+
+        let err = invalid_content.err().unwrap();
+        assert_eq!(
+            "Simple integer must not contain either \\r or \\n".to_string(),
+            err.to_string()
+        );
+
+        let invalid_utf8 = RespType::try_from(b":\xA4\r\n".as_slice());
+
+        assert!(invalid_utf8.is_err());
+
+        let err = invalid_utf8.err().unwrap();
+        assert_eq!(
+            "Simple integer must be a valid utf8 encoded string".to_string(),
+            err.to_string()
+        );
+
+        let invalid_i64 = RespType::try_from(
+            b":10000000000000000000000000000000000000000000000000\r\n".as_slice(),
+        );
+
+        assert!(invalid_i64.is_err());
+
+        let err = invalid_i64.err().unwrap();
+        assert!(err.to_string().starts_with("invalid integer value:"));
+    }
+
+    #[test]
     fn resptype_parse_simplestring() {
         let expected = RespType::SimpleString {
             content: "ciao".into(),
         };
 
-        assert_eq!(expected, RespType::try_from("+ciao\r\n".as_bytes()).unwrap());
+        assert_eq!(
+            expected,
+            RespType::try_from("+ciao\r\n".as_bytes()).unwrap()
+        );
 
         let invalid_terminated = RespType::try_from("+ciao".as_bytes());
 
@@ -260,6 +339,15 @@ mod test {
     }
 
     #[test]
+    fn resptype_serialize_integer() {
+        let to_ser = RespType::Integer { integer: 43 };
+        assert_eq!(to_ser.serialize(), b":43\r\n");
+
+        let to_ser = RespType::Integer { integer: -43 };
+        assert_eq!(to_ser.serialize(), b":-43\r\n");
+    }
+
+    #[test]
     fn resptype_serialize_simplestring() {
         let to_ser = RespType::SimpleString {
             content: "ciao".into(),
@@ -274,7 +362,10 @@ mod test {
             content: "ciao".into(),
         };
 
-        assert_eq!(expected, RespType::try_from("-ciao\r\n".as_bytes()).unwrap());
+        assert_eq!(
+            expected,
+            RespType::try_from("-ciao\r\n".as_bytes()).unwrap()
+        );
 
         let invalid_terminated = RespType::try_from("-ciao".as_bytes());
 

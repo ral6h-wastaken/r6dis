@@ -55,6 +55,7 @@ impl Redis {
                 }),
                 None => Ok(RespType::NullBulkString),
             },
+            Command::Rpush { key, elements } => todo!(),
         }
     }
 }

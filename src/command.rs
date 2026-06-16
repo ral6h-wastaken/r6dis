@@ -17,6 +17,10 @@ pub enum Command {
     Get {
         key: String,
     },
+    Rpush {
+        key: String,
+        elements: Vec<String>
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -46,20 +50,11 @@ impl TryFrom<resp::RespType> for Command {
                             .to_ascii_uppercase();
 
                         match cmd.as_str() {
-                            "ECHO" => {
-                                let msg = elements.get(1).unwrap();
-                                let msg = match msg {
-                                    RespType::BulkString { data } => {
-                                        String::from_utf8(data.clone()).unwrap()
-                                    }
-                                    _ => todo!(),
-                                };
-
-                                Ok(Self::Echo { to_echo: msg })
-                            }
+                            "ECHO" => parse_echo_cmd(&elements),
                             "PING" => Ok(Self::Ping),
-                            "SET" => parse_set_cmd(elements),
-                            "GET" => parse_get_cmd(elements),
+                            "SET" => parse_set_cmd(&elements),
+                            "GET" => parse_get_cmd(&elements),
+                            "RPUSH" => parse_rpush_cmd(&elements),
                             _ => Err(io::Error::other("NYI")),
                         }
                     }
@@ -71,7 +66,22 @@ impl TryFrom<resp::RespType> for Command {
     }
 }
 
-fn parse_get_cmd(elements: Vec<RespType>) -> Result<Command, io::Error> {
+fn parse_rpush_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
+    todo!()
+}
+
+fn parse_echo_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
+    let msg = elements.get(1).unwrap();
+    let msg = match msg {
+        RespType::BulkString { data } => {
+            String::from_utf8(data.clone()).unwrap()
+        }
+        _ => todo!(),
+    };
+    Ok(Command::Echo { to_echo: msg })
+}
+
+fn parse_get_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
     let key = elements
         .get(1)
         .and_then(|k| match k {
@@ -85,7 +95,7 @@ fn parse_get_cmd(elements: Vec<RespType>) -> Result<Command, io::Error> {
     Ok(Command::Get { key })
 }
 
-fn parse_set_cmd(elements: Vec<RespType>) -> Result<Command, io::Error> {
+fn parse_set_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
     let key = elements
         .get(1)
         .and_then(|k| match k {
@@ -113,7 +123,7 @@ fn parse_set_cmd(elements: Vec<RespType>) -> Result<Command, io::Error> {
     })
 }
 
-fn parse_set_options(elements: Vec<RespType>) -> Result<SetOptions, io::Error> {
+fn parse_set_options(elements: &[RespType]) -> Result<SetOptions, io::Error> {
     // The SET command supports a set of options that modify its behavior:
     //
     //     NX -- Only set the key if it does not already exist.
@@ -206,7 +216,7 @@ mod test {
                 data: "value".as_bytes().to_vec(),
             },
         ];
-        let parsed = parse_set_cmd(elements);
+        let parsed = parse_set_cmd(&elements);
 
         assert!(parsed.is_ok());
         let parsed = parsed.unwrap();
@@ -241,7 +251,7 @@ mod test {
                 data: "1000".as_bytes().to_vec(),
             },
         ];
-        let parsed = parse_set_cmd(elements);
+        let parsed = parse_set_cmd(&elements);
 
         assert!(parsed.is_ok());
         let parsed = parsed.unwrap();
@@ -265,7 +275,7 @@ mod test {
                 data: "1".as_bytes().to_vec(),
             },
         ];
-        let parsed = parse_set_cmd(elements);
+        let parsed = parse_set_cmd(&elements);
 
         assert!(parsed.is_ok());
         let parsed = parsed.unwrap();
@@ -292,7 +302,7 @@ mod test {
                 data: "ciccio".as_bytes().to_vec(),
             },
         ];
-        let parsed = parse_set_cmd(elements);
+        let parsed = parse_set_cmd(&elements);
 
         assert!(parsed.is_err());
         assert!(
