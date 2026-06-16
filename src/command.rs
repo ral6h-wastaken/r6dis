@@ -19,8 +19,8 @@ pub enum Command {
     },
     Rpush {
         key: String,
-        elements: Vec<String>
-    }
+        elements: Vec<String>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -66,16 +66,46 @@ impl TryFrom<resp::RespType> for Command {
     }
 }
 
-fn parse_rpush_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
-    todo!()
+fn parse_rpush_cmd(raw_elements: &[RespType]) -> Result<Command, io::Error> {
+    if raw_elements.len() < 3 {
+        return Err(io::Error::other(
+            "Invalid RPUSH command: absent or invalid key",
+        ));
+    }
+
+    let key = raw_elements
+        .get(1)
+        .and_then(|k| match k {
+            RespType::BulkString { data } => String::from_utf8(data.clone()).ok(),
+            _ => None,
+        })
+        .ok_or(io::Error::other(
+            "Invalid RPUSH command: absent or invalid key",
+        ))?;
+
+    let mut elements = Vec::with_capacity(raw_elements.len() - 2);
+    for v in raw_elements.iter().skip(2) {
+        let elem = match v {
+            RespType::BulkString { data } => String::from_utf8(data.clone()).map_err(|err| {
+                io::Error::other(format!("Invalid UTF8 ecoded RPUSH argument: {err}"))
+            })?,
+            _ => {
+                return Err(io::Error::other(
+                    "RPUSH arguments must be RESP bulk strings",
+                ));
+            }
+        };
+
+        elements.push(elem);
+    }
+
+    Ok(Command::Rpush { key, elements })
 }
 
 fn parse_echo_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
     let msg = elements.get(1).unwrap();
     let msg = match msg {
-        RespType::BulkString { data } => {
-            String::from_utf8(data.clone()).unwrap()
-        }
+        RespType::BulkString { data } => String::from_utf8(data.clone()).unwrap(),
         _ => todo!(),
     };
     Ok(Command::Echo { to_echo: msg })

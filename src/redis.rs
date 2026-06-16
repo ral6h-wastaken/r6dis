@@ -5,7 +5,8 @@ use crate::{command::Command, resp::RespType};
 
 #[derive(Debug)]
 pub struct Redis {
-    store: HashMap<String, StoredValue>,
+    kv_store: HashMap<String, StoredValue>,
+    list_store: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -17,7 +18,8 @@ struct StoredValue {
 impl Redis {
     pub fn new() -> Self {
         Self {
-            store: HashMap::new(),
+            kv_store: HashMap::new(),
+            list_store: HashMap::new(),
         }
     }
 
@@ -39,15 +41,15 @@ impl Redis {
                     ttl: options.expire().map(|exp| time::Instant::now().add(exp)),
                 };
 
-                self.store.insert(key, value);
+                self.kv_store.insert(key, value);
 
                 Ok(RespType::SimpleString {
                     content: "OK".into(),
                 })
             }
-            Command::Get { key } => match self.store.get(key.as_str()) {
+            Command::Get { key } => match self.kv_store.get(key.as_str()) {
                 Some(v) if v.ttl.is_some_and(|ttl| time::Instant::now().gt(&ttl)) => {
-                    self.store.remove(&key);
+                    self.kv_store.remove(&key);
                     Ok(RespType::NullBulkString)
                 }
                 Some(v) => Ok(RespType::BulkString {
@@ -55,7 +57,16 @@ impl Redis {
                 }),
                 None => Ok(RespType::NullBulkString),
             },
-            Command::Rpush { key, elements } => todo!(),
+            Command::Rpush { key, mut elements } => {
+                let entry = self.list_store
+                    .entry(key)
+                    .and_modify(|l| l.append(&mut elements))
+                    .or_insert(elements);
+
+                Ok(RespType::Integer {
+                    integer: entry.len() as i64
+                })
+            }
         }
     }
 }
