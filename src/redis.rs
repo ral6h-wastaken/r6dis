@@ -10,6 +10,12 @@ pub struct Redis {
 }
 
 #[derive(Debug)]
+pub enum RedisError {
+    Failure(String),
+    WouldBlock { timeout: Option<time::Duration> },
+}
+
+#[derive(Debug)]
 struct StoredValue {
     data: String,
     ttl: Option<time::Instant>,
@@ -23,7 +29,7 @@ impl Redis {
         }
     }
 
-    pub fn handle_command(&mut self, cmd: Command) -> Result<RespType, String> {
+    pub fn handle_command(&mut self, cmd: Command) -> Result<RespType, RedisError> {
         match cmd {
             Command::Ping => Ok(RespType::SimpleString {
                 content: "PONG".into(),
@@ -91,10 +97,7 @@ impl Redis {
             Command::LPop { key, count } => {
                 let mut pop_list = Vec::<String>::with_capacity(count);
 
-                while let Some(list) = self
-                    .list_store
-                    .get_mut(&key)
-                    .filter(|v| !v.is_empty())
+                while let Some(list) = self.list_store.get_mut(&key).filter(|v| !v.is_empty())
                     && pop_list.len() < count
                 {
                     pop_list.push(list.remove(0));
@@ -148,6 +151,8 @@ impl Redis {
                     _ => Ok(RespType::Array { elements: vec![] }),
                 }
             }
+            Command::BlPop { key, timeout } => todo!(),
+            Command::ErrorCmd { msg } => Ok(RespType::SimpleError { content: msg }),
         }
     }
 }

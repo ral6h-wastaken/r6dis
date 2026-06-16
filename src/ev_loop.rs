@@ -1,27 +1,24 @@
 use std::{
     collections::HashMap,
-    io::{self, Read as _, Write as _},
-    net::{TcpListener, TcpStream},
+    io::{self},
+    net::TcpListener,
     os::fd::AsRawFd,
 };
+
+mod client;
 
 use libc::{EPOLLERR, EPOLLHUP, EPOLLIN, EPOLLOUT, EPOLLRDHUP};
 
 use crate::{command::Command, poll::Poller, redis::Redis, resp::RespType};
 
 #[derive(Debug)]
-struct Client {
-    stream: TcpStream,
-    buffer: Vec<u8>,
-}
-
-#[derive(Debug)]
 pub struct EventLoop {
     redis: Redis,
     listener: TcpListener,
-    clients: HashMap<i32, Client>,
+    clients: HashMap<i32, client::Client>,
     poller: Poller,
 }
+
 
 impl EventLoop {
     pub fn new(listener: TcpListener, poller: Poller) -> Self {
@@ -59,10 +56,7 @@ impl EventLoop {
                                 self.poller.watch_socket(&stream)?;
                                 self.clients.insert(
                                     stream.as_raw_fd(),
-                                    Client {
-                                        stream,
-                                        buffer: vec![],
-                                    },
+                                    client::Client::new(stream),
                                 );
                             }
                             Err(err) => match err.kind() {
@@ -79,66 +73,34 @@ impl EventLoop {
                     if (EPOLLIN as u32) & ev.events != 0 {
                         println!("Socket {descriptor} available for read");
 
-                        let mut buf = [0u8; 512];
                         //we're guaranteed that descriptor is a valid key by the top level if and by
                         //this program being single threaded :D
                         let client = self.clients.get_mut(&(descriptor as i32)).unwrap();
 
-                        let mut socket = &client.stream;
-                        let buffer = &mut client.buffer;
-
-                        let read_bytes = match socket.read(&mut buf) {
-                            Err(err) => {
-                                let errmsg = format!("Could not read from socket, got error {err}");
-                                errmsg.into_bytes()
-                            }
-                            Ok(read) => buf[..read].to_vec(),
-                        };
-
+                        let read_bytes = client.read_raw_cmd();
                         // println!("DEBUG: Read command {}", String::from_utf8(read_bytes.clone()).unwrap());
 
-                        let response = match RespType::try_from(read_bytes.as_slice())
-                            .and_then(Command::try_from)
-                        {
-                            Ok(cmd) => {
-                                println!("received message {cmd:?}");
-                                match self.redis.handle_command(cmd) {
-                                    Ok(response) => response,
-                                    Err(err) => RespType::SimpleError {
-                                        content: format!("Error while handling command: {}", &err),
-                                    },
-                                }
-                            }
-                            Err(err) => {
-                                let msg = format!("Invalid RESP command, got error {err}");
-                                RespType::SimpleError {
-                                    content: msg
-                                }
-                            }
-                        };
+                        let cmd = RespType::try_from(read_bytes.as_slice())
+                            .map(Command::from)
+                            .unwrap_or_else(|err| Command::ErrorCmd { msg: format!("Could not parse command, got error: {err}") });
 
-                        response.serialize().iter().for_each(|c| buffer.push(*c));
+                        client.step(self.redis.handle_command(cmd));
                     }
 
                     if (EPOLLOUT as u32) & ev.events != 0 {
-                        let c = self.clients.get_mut(&(descriptor as i32)).unwrap();
-                        if !c.buffer.is_empty() {
-                            println!("Socket {descriptor} available for write");
+                        let client = self.clients.get_mut(&(descriptor as i32)).unwrap();
 
-                            if let Err(err) = c.stream.write_all(&c.buffer) {
-                                match err.kind() {
-                                    io::ErrorKind::WouldBlock => {
-                                        println!("would block")
-                                        /* do nothing we'll come back next time */
-                                    }
-                                    _ => {
-                                        return Err(err);
-                                    }
+                        if let Err(err) = client.flush() {
+                            match err.kind() {
+                                io::ErrorKind::WouldBlock => {
+                                    println!("would block")
+                                    /* do nothing we'll come back next time */
                                 }
-                            } else {
-                                c.buffer.clear();
+                                _ => {
+                                    return Err(err);
+                                }
                             }
-                        }
+                        } 
                     }
 
                     //not exclusive cause it could be the case that the file desc is available for
@@ -149,7 +111,7 @@ impl EventLoop {
                         //map
                         println!("removing socket {descriptor}");
                         let removed = self.clients.remove(&(descriptor as i32)).unwrap();
-                        self.poller.remove_socket(&removed.stream)?;
+                        self.poller.remove_socket(removed.stream())?;
                     }
                 }
             }

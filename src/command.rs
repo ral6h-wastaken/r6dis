@@ -1,5 +1,5 @@
 use core::time;
-use std::io;
+use std::{io, time::Duration};
 
 use crate::resp::{self, RespType};
 
@@ -35,7 +35,14 @@ pub enum Command {
     },
     LPop {
         key: String,
-        count: usize
+        count: usize,
+    },
+    BlPop {
+        key: String,
+        timeout: Option<time::Duration>,
+    },
+    ErrorCmd {
+        msg: String,
     },
 }
 
@@ -50,10 +57,19 @@ impl SetOptions {
     }
 }
 
-impl TryFrom<resp::RespType> for Command {
-    type Error = io::Error;
+impl From<resp::RespType> for Command {
+    fn from(value: resp::RespType) -> Self {
+        match Self::try_from(value) {
+            Ok(cmd) => cmd,
+            Err(err) => Self::ErrorCmd {
+                msg: format!("{err}"),
+            },
+        }
+    }
+}
 
-    fn try_from(value: resp::RespType) -> Result<Self, Self::Error> {
+impl Command {
+    fn try_from(value: resp::RespType) -> Result<Self, io::Error> {
         match value {
             resp::RespType::Array { elements } => {
                 match elements
@@ -75,6 +91,7 @@ impl TryFrom<resp::RespType> for Command {
                             "LRANGE" => parse_lrange_cmd(&elements),
                             "LLEN" => parse_llen_cmd(&elements),
                             "LPOP" => parse_lpop_cmd(&elements),
+                            "BLPOP" => parse_blpop_cmd(&elements),
                             _ => Err(io::Error::other("NYI")),
                         }
                     }
@@ -84,6 +101,31 @@ impl TryFrom<resp::RespType> for Command {
             _ => Err(io::Error::other("Redis Commands should be RESP arrays")),
         }
     }
+}
+
+fn parse_blpop_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
+    let key = elements
+        .get(1)
+        .and_then(|k| match k {
+            RespType::BulkString { data } => Some(data),
+            _ => None,
+        })
+        .and_then(|utf8| String::from_utf8(utf8.clone()).ok())
+        .ok_or(io::Error::other(
+            "Invalid BLPOP command: absent or invalid key",
+        ))?;
+
+    let timeout = elements
+        .get(2)
+        .and_then(|k| match k {
+            RespType::BulkString { data } => Some(data),
+            _ => None,
+        })
+        .and_then(|utf8| String::from_utf8(utf8.clone()).ok())
+        .and_then(|str_repr| str_repr.parse::<u64>().ok())
+        .map(Duration::from_secs);
+
+    Ok(Command::BlPop { key, timeout })
 }
 
 fn parse_lpop_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
@@ -98,20 +140,22 @@ fn parse_lpop_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
             "Invalid LPOP command: absent or invalid key",
         ))?;
 
-    let count = elements
-        .get(2)
-        .and_then(|k| match k {
-            RespType::BulkString { data } => Some(data),
-            _ => None,
-        })
-        .and_then(|utf8| String::from_utf8(utf8.clone()).ok())
-        .and_then(|str_repr| str_repr.parse::<usize>().ok())
-        .ok_or(io::Error::other(
-            "Invalid LPOP command: value is not valid utf8 or out of range, must be positive",
-        ))?;
+    let count_opt = elements.get(2).and_then(|k| match k {
+        RespType::BulkString { data } => Some(data),
+        _ => None,
+    });
 
+    let count = match count_opt {
+        Some(utf8) => String::from_utf8(utf8.clone())
+            .ok()
+            .and_then(|str_repr| str_repr.parse::<usize>().ok())
+            .ok_or(io::Error::other(
+                "Invalid LPOP command: value is not valid utf8 or out of range, must be positive",
+            ))?,
+        None => 1,
+    };
 
-    Ok(Command::LPop { key, count})
+    Ok(Command::LPop { key, count })
 }
 
 fn parse_llen_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
