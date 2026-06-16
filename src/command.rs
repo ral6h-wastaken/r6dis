@@ -30,6 +30,9 @@ pub enum Command {
         start: i64,
         stop: i64,
     },
+    LLen {
+        key: String,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -66,6 +69,7 @@ impl TryFrom<resp::RespType> for Command {
                             "RPUSH" => parse_rpush_cmd(&elements),
                             "LPUSH" => parse_lpush_cmd(&elements),
                             "LRANGE" => parse_lrange_cmd(&elements),
+                            "LLEN" => parse_llen_cmd(&elements),
                             _ => Err(io::Error::other("NYI")),
                         }
                     }
@@ -75,6 +79,21 @@ impl TryFrom<resp::RespType> for Command {
             _ => Err(io::Error::other("Redis Commands should be RESP arrays")),
         }
     }
+}
+
+fn parse_llen_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
+    let key = elements
+        .get(1)
+        .and_then(|k| match k {
+            RespType::BulkString { data } => Some(data),
+            _ => None,
+        })
+        .and_then(|utf8| String::from_utf8(utf8.clone()).ok())
+        .ok_or(io::Error::other(
+            "Invalid LLEN command: absent or invalid key",
+        ))?;
+
+    Ok(Command::LLen { key })
 }
 
 fn parse_lrange_cmd(elements: &[RespType]) -> Result<Command, io::Error> {

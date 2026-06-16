@@ -84,6 +84,14 @@ impl Redis {
                     integer: entry.len() as i64,
                 })
             }
+            Command::LLen { key } => {
+                let len = self.list_store.get(&key)
+                    .map_or(0, |l| l.len());
+
+                Ok(RespType::Integer {
+                    integer: len as i64,
+                })
+            }
             Command::LRange { key, start, stop } => {
                 // Out of range indexes will not produce an error.
                 // If start is larger than the end of the list, an empty list is returned.
