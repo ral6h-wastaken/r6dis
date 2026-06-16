@@ -75,7 +75,6 @@ impl Redis {
                     .and_modify(|l| {
                         elements
                             .iter()
-                            .inspect(|el| println!("inserting {el}"))
                             .for_each(|el| l.insert(0, el.clone()));
                     })
                     .or_insert(elements.into_iter().rev().collect());
@@ -91,6 +90,15 @@ impl Redis {
                 Ok(RespType::Integer {
                     integer: len as i64,
                 })
+            }
+            Command::LPop { key } => {
+                match self.list_store.get_mut(&key)
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.remove(0))
+                    .map(|popped| RespType::BulkString { data: popped.as_bytes().to_vec() }) {
+                        Some(bk) => Ok(bk),
+                        None => Ok(RespType::NullBulkString)
+                    }
             }
             Command::LRange { key, start, stop } => {
                 // Out of range indexes will not produce an error.
