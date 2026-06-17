@@ -1,22 +1,33 @@
 use std::collections::HashMap;
+use std::fmt::Debug;
+use std::time::Instant;
 use std::{ops::Add as _, time};
 
 use crate::{command::Command, resp::RespType};
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Redis {
     kv_store: HashMap<String, StoredValue>,
     list_store: HashMap<String, Vec<String>>,
+    //key is the client_id, the values are the keys that blpop is waiting for
+    //once we need to be waiting on more than one command we will introduce an enum
+    //that will, for blpop, encapsulate this vec
+    pub waiting: HashMap<i32, WaitingState>,
+    blocking_keys: HashMap<String, Vec<i32>>,
+    ready: HashMap<i32, RespType>,
 }
 
+#[derive(Debug, Default)]
+pub struct WaitingState {
+    keys: Vec<String>,
+    timeout: Option<time::Instant>,
+}
+
+#[allow(unused)] //TODO [LS]: remove the allow once we use the failure error
 #[derive(Debug)]
-#[allow(unused)]
-//TODO [LS]: remove the allow once we use the failure error
 pub enum RedisError {
     Failure(String),
-    WouldBlock {
-        timeout: Option<time::Duration> 
-    },
+    WouldBlock,
 }
 
 #[derive(Debug)]
@@ -26,14 +37,7 @@ struct StoredValue {
 }
 
 impl Redis {
-    pub fn new() -> Self {
-        Self {
-            kv_store: HashMap::new(),
-            list_store: HashMap::new(),
-        }
-    }
-
-    pub fn handle_command(&mut self, cmd: Command) -> Result<RespType, RedisError> {
+    pub fn handle_command(&mut self, cmd: Command, client_id: i32) -> Result<RespType, RedisError> {
         match cmd {
             Command::Ping => Ok(RespType::SimpleString {
                 content: "PONG".into(),
@@ -155,12 +159,67 @@ impl Redis {
                     _ => Ok(RespType::Array { elements: vec![] }),
                 }
             }
-            Command::BlPop { key: _, timeout } => {
-                //TODO [LS] implement
-                Err(RedisError::WouldBlock { timeout })
+            Command::BlPop { key, timeout } => {
+                match self.list_store.get(&key).and_then(|l| l.first()) {
+                    Some(_) => {
+                        let val = self.list_store.get_mut(&key).unwrap().remove(0);
+                        Ok(RespType::Array {
+                            elements: vec![
+                                RespType::BulkString {
+                                    data: key.into_bytes(),
+                                },
+                                RespType::BulkString {
+                                    data: val.into_bytes(),
+                                },
+                            ],
+                        })
+                    }
+                    None => {
+                        let waiting_state = self.waiting.entry(client_id).or_default();
+
+                        waiting_state.keys.push(key.clone());
+                        waiting_state.timeout = timeout.map(|dur| Instant::now() + dur);
+
+                        self.blocking_keys
+                            .entry(key)
+                            .or_insert(vec![])
+                            .push(client_id);
+
+                        Err(RedisError::WouldBlock)
+                    }
+                }
             }
             Command::ErrorCmd { msg } => Ok(RespType::SimpleError { content: msg }),
         }
+    }
+
+    pub(crate) fn remove_waiting(&mut self, client_id: &i32) {
+        self.ready.remove(client_id);
+
+        if let Some(state) = self.waiting.remove(client_id) {
+            for key in state.keys {
+                if let Some(blocked) = self.blocking_keys.get_mut(&key)
+                    && let Some(idx) = blocked.iter().position(|bl| bl == client_id)
+                {
+                    blocked.remove(idx);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn remove_expired(&mut self) -> Vec<i32> {
+        let expired: Vec<i32> = self
+            .waiting
+            .iter()
+            .filter(|(_, v)| v.timeout.is_some_and(|t| time::Instant::now() >= t))
+            .map(|(k, _)| *k)
+            .collect();
+
+        for cl in &expired {
+            self.remove_waiting(cl);
+        }
+
+        expired
     }
 }
 
@@ -170,7 +229,7 @@ mod test {
 
     #[test]
     fn test_handle_lrange() {
-        let mut rds = super::Redis::new();
+        let mut rds = super::Redis::default();
 
         let key = String::from("test key");
 
@@ -185,7 +244,7 @@ mod test {
             ],
         };
 
-        let sz = rds.handle_command(rpush_cmd).unwrap();
+        let sz = rds.handle_command(rpush_cmd, 0).unwrap();
         assert_eq!(sz, RespType::Integer { integer: 5 });
 
         //test stop > len
@@ -194,7 +253,7 @@ mod test {
             start: 0,
             stop: 1234,
         };
-        let res = rds.handle_command(lrange_cmd);
+        let res = rds.handle_command(lrange_cmd, 0);
         let expected = RespType::Array {
             elements: vec![
                 RespType::BulkString {
@@ -226,7 +285,7 @@ mod test {
             start: -3,
             stop: -1,
         };
-        let res = rds.handle_command(lrange_cmd);
+        let res = rds.handle_command(lrange_cmd, 0);
         let expected = RespType::Array {
             elements: vec![
                 RespType::BulkString {
@@ -251,7 +310,7 @@ mod test {
             start: -1,
             stop: -2,
         };
-        let res = rds.handle_command(lrange_cmd);
+        let res = rds.handle_command(lrange_cmd, 0);
         let expected = RespType::Array { elements: vec![] };
 
         assert!(res.is_ok_and(|val| {

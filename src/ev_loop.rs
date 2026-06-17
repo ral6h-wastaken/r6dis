@@ -1,9 +1,5 @@
 use std::{
-    collections::HashMap,
-    io::{self},
-    net::TcpListener,
-    os::fd::AsRawFd,
-    time
+    collections::HashMap, io::{self}, net::TcpListener, os::fd::AsRawFd
 };
 
 mod client;
@@ -15,25 +11,18 @@ use crate::{command::Command, poll::Poller, redis::Redis, resp::RespType};
 #[derive(Debug)]
 pub struct EventLoop {
     redis: Redis,
-    waiting: HashMap<i32, Callback>,
     listener: TcpListener,
     clients: HashMap<i32, client::Client>,
     poller: Poller,
 }
 
-#[derive(Debug)]
-struct Callback {
-    expiry: Option<time::Instant>,
-}
-
 impl EventLoop {
     pub fn new(listener: TcpListener, poller: Poller) -> Self {
         Self {
-            redis: Redis::new(),
+            redis: Redis::default(),
             listener,
             poller,
             clients: HashMap::new(),
-            waiting: HashMap::new(),
         }
     }
 
@@ -44,29 +33,15 @@ impl EventLoop {
         'event_loop: loop {
             // println!("Looper state {self:?}");
 
-            //TODO [LS]: try to wake waiting clients
-            let mut to_remove = vec![];
-
-            for cl in self.waiting.keys() {
-                let cb = self.waiting.get(cl);
-                if let Some(ttl) = cb.and_then(|cb| cb.expiry)
-                    && ttl <= time::Instant::now()
-                {
-                    let client = self.clients.get_mut(cl).unwrap();
-
-                    client.send(RespType::SimpleString {
-                        content: "Timeout!".into(),
-                    });
-
-                    to_remove.push(*cl);
+            //loop over all waiting and for each expired send back a null bulk str
+            for client_id in self.redis.remove_expired() {
+                if let Some(cl) = self.clients.get_mut(&client_id) {
+                    println!("Timeout occurred for {cl:?}");
+                    cl.send(RespType::NullBulkString);
                 }
             }
 
-            for tr in to_remove {
-                self.waiting.remove(&tr);
-            }
-
-            let events = self.poller.poll(1_000)?;
+            let events = self.poller.poll(-1)?;
 
             for ev in events {
                 let descriptor = ev.u64;
@@ -114,14 +89,12 @@ impl EventLoop {
                                 msg: format!("Could not parse command, got error: {err}"),
                             });
 
-                        match self.redis.handle_command(cmd) {
+                        match self.redis.handle_command(cmd, descriptor as i32) {
                             Ok(response) => client.send(response),
                             Err(err) => match err {
                                 crate::redis::RedisError::Failure(_) => todo!(),
-                                crate::redis::RedisError::WouldBlock { timeout } => {
-                                    self.waiting.insert(descriptor as i32, Callback {
-                                        expiry: timeout.map(|t|/*TODO [LS]: fix*/ time::Instant::now() + t),
-                                    });
+                                crate::redis::RedisError::WouldBlock => {
+                                    /* do nothing, we come back at next iteration */
                                 }
                             },
                         }
@@ -150,7 +123,7 @@ impl EventLoop {
                         //the if condition guarantees that the key always is present in the clients
                         //map
                         println!("removing socket {descriptor}");
-                        self.waiting.remove(&(descriptor as i32));
+                        self.redis.remove_waiting(&(descriptor as i32));
                         let removed = self.clients.remove(&(descriptor as i32)).unwrap();
                         self.poller.remove_socket(removed.stream())?;
                     }

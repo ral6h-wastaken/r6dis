@@ -3,7 +3,7 @@ use std::{io, time::Duration};
 
 use crate::resp::{self, RespType};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Command {
     Ping,
     Echo {
@@ -46,7 +46,7 @@ pub enum Command {
     },
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SetOptions {
     expire: Option<time::Duration>,
 }
