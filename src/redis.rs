@@ -12,9 +12,10 @@ pub struct Redis {
     //key is the client_id, the values are the keys that blpop is waiting for
     //once we need to be waiting on more than one command we will introduce an enum
     //that will, for blpop, encapsulate this vec
-    pub waiting: HashMap<i32, WaitingState>,
+    pub waiting_clients: HashMap<i32, WaitingState>,
+    pub to_be_notified: Vec<(i32, String)>,
     blocking_keys: HashMap<String, Vec<i32>>,
-    ready: HashMap<i32, RespType>,
+    pub ready: Vec<(i32, RespType)>,
 }
 
 #[derive(Debug, Default)]
@@ -38,6 +39,8 @@ struct StoredValue {
 
 impl Redis {
     pub fn handle_command(&mut self, cmd: Command, client_id: i32) -> Result<RespType, RedisError> {
+        println!("Handling command {cmd:?} from client {client_id}");
+
         match cmd {
             Command::Ping => Ok(RespType::SimpleString {
                 content: "PONG".into(),
@@ -74,9 +77,17 @@ impl Redis {
             Command::RPush { key, mut elements } => {
                 let entry = self
                     .list_store
-                    .entry(key)
+                    .entry(key.clone())
                     .and_modify(|l| l.append(&mut elements))
                     .or_insert(elements);
+
+                //"notify" waiting clients
+                if let Some(clients) = self.blocking_keys.get_mut(&key).filter(|v| !v.is_empty()) {
+                    let longest = clients.remove(0);
+                    //a client can only be waiting for a single event at a time, if it stops
+                    //waiting then it is removed from the to_be_notified map
+                    self.to_be_notified.push((longest, key.clone()));
+                }
 
                 Ok(RespType::Integer {
                     integer: entry.len() as i64,
@@ -85,11 +96,19 @@ impl Redis {
             Command::LPush { key, elements } => {
                 let entry = self
                     .list_store
-                    .entry(key)
+                    .entry(key.clone())
                     .and_modify(|l| {
                         elements.iter().for_each(|el| l.insert(0, el.clone()));
                     })
                     .or_insert(elements.into_iter().rev().collect());
+
+                //"notify" waiting clients
+                if let Some(clients) = self.blocking_keys.get_mut(&key).filter(|v| !v.is_empty()) {
+                    let longest = clients.remove(0);
+                    //a client can only be waiting for a single event at a time, if it stops
+                    //waiting then it is removed from the to_be_notified map
+                    self.to_be_notified.push((longest, key.clone()));
+                }
 
                 Ok(RespType::Integer {
                     integer: entry.len() as i64,
@@ -102,30 +121,7 @@ impl Redis {
                     integer: len as i64,
                 })
             }
-            Command::LPop { key, count } => {
-                let mut pop_list = Vec::<String>::with_capacity(count);
-
-                while let Some(list) = self.list_store.get_mut(&key).filter(|v| !v.is_empty())
-                    && pop_list.len() < count
-                {
-                    pop_list.push(list.remove(0));
-                }
-
-                match pop_list.len() {
-                    0 => Ok(RespType::NullBulkString),
-                    1 => Ok(RespType::BulkString {
-                        data: pop_list[0].as_bytes().to_vec(),
-                    }),
-                    _ => Ok(RespType::Array {
-                        elements: pop_list
-                            .iter()
-                            .map(|popped| RespType::BulkString {
-                                data: popped.as_bytes().to_vec(),
-                            })
-                            .collect(),
-                    }),
-                }
-            }
+            Command::LPop { key, count } => self.lpop(key, count),
             Command::LRange { key, start, stop } => {
                 // Out of range indexes will not produce an error.
                 // If start is larger than the end of the list, an empty list is returned.
@@ -175,7 +171,7 @@ impl Redis {
                         })
                     }
                     None => {
-                        let waiting_state = self.waiting.entry(client_id).or_default();
+                        let waiting_state = self.waiting_clients.entry(client_id).or_default();
 
                         waiting_state.keys.push(key.clone());
                         waiting_state.timeout = timeout.map(|dur| Instant::now() + dur);
@@ -194,9 +190,19 @@ impl Redis {
     }
 
     pub(crate) fn remove_waiting(&mut self, client_id: &i32) {
-        self.ready.remove(client_id);
+        if let Some(idx) = self
+            .to_be_notified
+            .iter()
+            .position(|(id, _)| id == client_id)
+        {
+            self.to_be_notified.remove(idx);
+        }
 
-        if let Some(state) = self.waiting.remove(client_id) {
+        if let Some(idx) = self.ready.iter().position(|(id, _)| id == client_id) {
+            self.ready.remove(idx);
+        }
+
+        if let Some(state) = self.waiting_clients.remove(client_id) {
             for key in state.keys {
                 if let Some(blocked) = self.blocking_keys.get_mut(&key)
                     && let Some(idx) = blocked.iter().position(|bl| bl == client_id)
@@ -209,7 +215,7 @@ impl Redis {
 
     pub(crate) fn remove_expired(&mut self) -> Vec<i32> {
         let expired: Vec<i32> = self
-            .waiting
+            .waiting_clients
             .iter()
             .filter(|(_, v)| v.timeout.is_some_and(|t| time::Instant::now() >= t))
             .map(|(k, _)| *k)
@@ -220,6 +226,45 @@ impl Redis {
         }
 
         expired
+    }
+
+    pub(crate) fn compute_ready(&mut self) {
+        while let Some((client_id, key)) = self.to_be_notified.pop() {
+            let cl_key = key.clone();
+            let resp = self.lpop(key, 1).map(|val| RespType::Array {
+                elements: vec![RespType::BulkString {
+                    data: cl_key.as_bytes().to_vec(),
+                }, val],
+            })
+            .unwrap();
+
+            self.ready.push((client_id, resp));
+        }
+    }
+
+    fn lpop(&mut self, key: String, count: usize) -> Result<RespType, RedisError> {
+        let mut pop_list = Vec::<String>::with_capacity(count);
+
+        while let Some(list) = self.list_store.get_mut(&key).filter(|v| !v.is_empty())
+            && pop_list.len() < count
+        {
+            pop_list.push(list.remove(0));
+        }
+
+        match pop_list.len() {
+            0 => Ok(RespType::NullBulkString),
+            1 => Ok(RespType::BulkString {
+                data: pop_list[0].as_bytes().to_vec(),
+            }),
+            _ => Ok(RespType::Array {
+                elements: pop_list
+                    .iter()
+                    .map(|popped| RespType::BulkString {
+                        data: popped.as_bytes().to_vec(),
+                    })
+                    .collect(),
+            }),
+        }
     }
 }
 

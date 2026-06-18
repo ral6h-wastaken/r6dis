@@ -1,5 +1,8 @@
 use std::{
-    collections::HashMap, io::{self}, net::TcpListener, os::fd::AsRawFd
+    collections::HashMap,
+    io::{self},
+    net::TcpListener,
+    os::fd::AsRawFd,
 };
 
 mod client;
@@ -36,8 +39,18 @@ impl EventLoop {
             //loop over all waiting and for each expired send back a null bulk str
             for client_id in self.redis.remove_expired() {
                 if let Some(cl) = self.clients.get_mut(&client_id) {
-                    println!("Timeout occurred for {cl:?}");
+                    println!("Timeout occurred for {client_id:?}");
                     cl.send(RespType::NullBulkString);
+                }
+            }
+
+            self.redis.compute_ready();
+
+            while let Some((client_id, response)) = self.redis.ready.pop() {
+                if let Some(cl) = self.clients.get_mut(&client_id) {
+                    println!("Sending response {response:?} to client {client_id}");
+                    cl.send(response);
+                    println!("Looper state {self:?}");
                 }
             }
 
@@ -61,6 +74,8 @@ impl EventLoop {
                                 self.poller.watch_socket(&stream)?;
                                 self.clients
                                     .insert(stream.as_raw_fd(), client::Client::new(stream));
+
+                                println!("Looper state {self:?}");
                             }
                             Err(err) => match err.kind() {
                                 io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {
@@ -74,8 +89,6 @@ impl EventLoop {
                     // println!("Got event from client: {ev:?}");
 
                     if (EPOLLIN as u32) & ev.events != 0 {
-                        println!("Socket {descriptor} available for read");
-
                         //we're guaranteed that descriptor is a valid key by the top level if and by
                         //this program being single threaded :D
                         let client = self.clients.get_mut(&(descriptor as i32)).unwrap();
@@ -90,7 +103,11 @@ impl EventLoop {
                             });
 
                         match self.redis.handle_command(cmd, descriptor as i32) {
-                            Ok(response) => client.send(response),
+                            Ok(response) => {
+                                println!("Sending response {response:?} to client {descriptor}");
+                                client.send(response);
+                                println!("Looper state {self:?}");
+                            }
                             Err(err) => match err {
                                 crate::redis::RedisError::Failure(_) => todo!(),
                                 crate::redis::RedisError::WouldBlock => {
@@ -126,6 +143,7 @@ impl EventLoop {
                         self.redis.remove_waiting(&(descriptor as i32));
                         let removed = self.clients.remove(&(descriptor as i32)).unwrap();
                         self.poller.remove_socket(removed.stream())?;
+                        println!("Looper state {self:?}");
                     }
                 }
             }
