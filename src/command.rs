@@ -41,6 +41,9 @@ pub enum Command {
         key: String,
         timeout: Option<time::Duration>,
     },
+    Type {
+        key: String,
+    },
     ErrorCmd {
         msg: String,
     },
@@ -92,6 +95,7 @@ impl Command {
                             "LLEN" => parse_llen_cmd(&elements),
                             "LPOP" => parse_lpop_cmd(&elements),
                             "BLPOP" => parse_blpop_cmd(&elements),
+                            "TYPE" => parse_type_cmd(&elements),
                             _ => Err(io::Error::other("NYI")),
                         }
                     }
@@ -101,6 +105,21 @@ impl Command {
             _ => Err(io::Error::other("Redis Commands should be RESP arrays")),
         }
     }
+}
+
+fn parse_type_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
+    let key = elements
+        .get(1)
+        .and_then(|k| match k {
+            RespType::BulkString { data } => Some(data),
+            _ => None,
+        })
+        .and_then(|utf8| String::from_utf8(utf8.clone()).ok())
+        .ok_or(io::Error::other(
+            "Invalid TYPE command: absent or invalid key",
+        ))?;
+
+    Ok(Command::Type { key })
 }
 
 fn parse_blpop_cmd(elements: &[RespType]) -> Result<Command, io::Error> {

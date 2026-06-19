@@ -185,6 +185,14 @@ impl Redis {
                     }
                 }
             }
+            Command::Type { key } => {
+                //TODO [LS]: only handle this case for now, refactor will be needed later
+                if let Some(_) = self.kv_store.get(&key) {
+                    Ok(RespType::SimpleString { content: "string".into() })
+                } else {
+                    Ok(RespType::SimpleString { content: "none".into() })
+                }
+            }
             Command::ErrorCmd { msg } => Ok(RespType::SimpleError { content: msg }),
         }
     }
