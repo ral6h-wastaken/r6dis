@@ -8,21 +8,25 @@ use crate::{command::Command, resp::RespType};
 #[derive(Debug, Default)]
 pub struct Redis {
     store: HashMap<String, RedisType>,
-    // kv_store: HashMap<String, StoredValue>,
-    // list_store: HashMap<String, Vec<String>>,
-    //key is the client_id, the values are the keys that blpop is waiting for
-    //once we need to be waiting on more than one command we will introduce an enum
-    //that will, for blpop, encapsulate this vec
-    pub waiting_clients: HashMap<i32, WaitingState>,
-    pub to_be_notified: Vec<(i32, String)>,
-    blocking_keys: HashMap<String, Vec<i32>>,
+
+    //map<client_id, (state, timeout)>
+    waiting_clients: HashMap<i32, (WaitingState, Option<time::Instant>)>,
+    //map<client_id, event>
+    to_be_notified: Vec<(i32, NotificationEvent)>,
+
+    blpop_blocking_keys: HashMap<String, Vec<i32>>,
+
     pub ready: Vec<(i32, RespType)>,
 }
 
-#[derive(Debug, Default)]
-pub struct WaitingState {
-    keys: Vec<String>,
-    timeout: Option<time::Instant>,
+#[derive(Debug)]
+pub enum NotificationEvent {
+    BlPopEvent { key: String },
+}
+
+#[derive(Debug)]
+pub enum WaitingState {
+    BlPop { keys: Vec<String> },
 }
 
 #[derive(Debug)]
@@ -126,12 +130,14 @@ impl Redis {
                 })
             }
             None => {
-                let waiting_state = self.waiting_clients.entry(client_id).or_default();
+                let keys = vec![key.clone()];
+                let timeout = timeout.map(|dur| Instant::now() + dur);
 
-                waiting_state.keys.push(key.clone());
-                waiting_state.timeout = timeout.map(|dur| Instant::now() + dur);
+                //a given client can only be blocked on a given state at once
+                self.waiting_clients
+                    .insert(client_id, (WaitingState::BlPop { keys }, timeout));
 
-                self.blocking_keys
+                self.blpop_blocking_keys
                     .entry(key)
                     .or_insert(vec![])
                     .push(client_id);
@@ -224,11 +230,12 @@ impl Redis {
                 elements: elements.into_iter().rev().collect(),
             });
         //"notify" waiting clients
-        if let Some(clients) = self.blocking_keys.get_mut(&key).filter(|v| !v.is_empty()) {
+        if let Some(clients) = self.blpop_blocking_keys.get_mut(&key).filter(|v| !v.is_empty()) {
             let longest = clients.remove(0);
             //a client can only be waiting for a single event at a time, if it stops
             //waiting then it is removed from the to_be_notified map
-            self.to_be_notified.push((longest, key.clone()));
+            self.to_be_notified
+                .push((longest, NotificationEvent::BlPopEvent { key: key.clone() }));
         }
 
         Ok(RespType::Integer {
@@ -260,11 +267,12 @@ impl Redis {
             .or_insert(RedisType::List { elements });
 
         //"notify" waiting clients
-        if let Some(clients) = self.blocking_keys.get_mut(&key).filter(|v| !v.is_empty()) {
+        if let Some(clients) = self.blpop_blocking_keys.get_mut(&key).filter(|v| !v.is_empty()) {
             let longest = clients.remove(0);
             //a client can only be waiting for a single event at a time, if it stops
             //waiting then it is removed from the to_be_notified map
-            self.to_be_notified.push((longest, key.clone()));
+            self.to_be_notified
+                .push((longest, NotificationEvent::BlPopEvent { key: key.clone() }));
         }
 
         Ok(RespType::Integer {
@@ -336,12 +344,16 @@ impl Redis {
             self.ready.remove(idx);
         }
 
-        if let Some(state) = self.waiting_clients.remove(client_id) {
-            for key in state.keys {
-                if let Some(blocked) = self.blocking_keys.get_mut(&key)
-                    && let Some(idx) = blocked.iter().position(|bl| bl == client_id)
-                {
-                    blocked.remove(idx);
+        if let Some((state, _)) = self.waiting_clients.remove(client_id) {
+            match state {
+                WaitingState::BlPop { keys } => {
+                    for key in keys {
+                        if let Some(blocked) = self.blpop_blocking_keys.get_mut(&key)
+                            && let Some(idx) = blocked.iter().position(|bl| bl == client_id)
+                        {
+                            blocked.remove(idx);
+                        }
+                    }
                 }
             }
         }
@@ -351,7 +363,7 @@ impl Redis {
         let expired: Vec<i32> = self
             .waiting_clients
             .iter()
-            .filter(|(_, v)| v.timeout.is_some_and(|t| time::Instant::now() >= t))
+            .filter(|(_, (_, timeout))| timeout.is_some_and(|t| time::Instant::now() >= t))
             .map(|(k, _)| *k)
             .collect();
 
@@ -363,21 +375,25 @@ impl Redis {
     }
 
     pub(crate) fn compute_ready(&mut self) {
-        while let Some((client_id, key)) = self.to_be_notified.pop() {
-            let cl_key = key.clone();
-            let resp = self
-                .handle_lpop(key, 1)
-                .map(|val| RespType::Array {
-                    elements: vec![
-                        RespType::BulkString {
-                            data: cl_key.as_bytes().to_vec(),
-                        },
-                        val,
-                    ],
-                })
-                .unwrap();
+        while let Some((client_id, notification)) = self.to_be_notified.pop() {
+            match notification {
+                NotificationEvent::BlPopEvent { key } => {
+                    let cl_key = key.clone();
+                    let resp = self
+                        .handle_lpop(key, 1)
+                        .map(|val| RespType::Array {
+                            elements: vec![
+                                RespType::BulkString {
+                                    data: cl_key.as_bytes().to_vec(),
+                                },
+                                val,
+                            ],
+                        })
+                        .unwrap();
 
-            self.ready.push((client_id, resp));
+                    self.ready.push((client_id, resp));
+                }
+            }
         }
     }
 
