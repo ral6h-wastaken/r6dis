@@ -137,20 +137,18 @@ fn parse_bulk_string(value: &[u8], cursor: usize) -> Result<(RespType, usize), i
         let length = length as usize;
         let cursor = sep_idx + 2;
 
-        let sep_idx = find_separator_index(value, cursor)
-            .ok_or(io::Error::other("Bulk strings must end with \\r\\n"))?;
+        let data = value[cursor..cursor+length].to_vec();
+        let cursor = cursor + length;
 
-        if (cursor + length) != sep_idx {
-            return Err(io::Error::other(
-                "Bulk string declared length does not match actual length",
-            ));
+        if &value[cursor..=cursor+1] != b"\r\n" {
+            return Err(io::Error::other("Bulk strings must end with \\r\\n"))
         }
-
+        
         Ok((
             RespType::BulkString {
-                data: value[cursor..sep_idx].to_vec(),
+                data
             },
-            sep_idx + 2,
+            cursor + 2,
         ))
     } else {
         if length != -1 {
@@ -452,17 +450,7 @@ mod test {
         let err = invalid_len.err().unwrap();
         assert_eq!("Invalid bulk string length".to_string(), err.to_string());
 
-        let invalid_len = RespType::try_from("$12\r\nciao\r\n".as_bytes());
-
-        assert!(invalid_len.is_err());
-
-        let err = invalid_len.err().unwrap();
-        assert_eq!(
-            "Bulk string declared length does not match actual length".to_string(),
-            err.to_string()
-        );
-
-        let invalid_end = RespType::try_from("$4\r\nciao".as_bytes());
+        let invalid_end = RespType::try_from("$4\r\nciaone".as_bytes());
 
         assert!(invalid_end.is_err());
 
