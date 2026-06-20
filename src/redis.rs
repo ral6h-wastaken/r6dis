@@ -7,8 +7,9 @@ use crate::{command::Command, resp::RespType};
 
 #[derive(Debug, Default)]
 pub struct Redis {
-    kv_store: HashMap<String, StoredValue>,
-    list_store: HashMap<String, Vec<String>>,
+    store: HashMap<String, RedisType>,
+    // kv_store: HashMap<String, StoredValue>,
+    // list_store: HashMap<String, Vec<String>>,
     //key is the client_id, the values are the keys that blpop is waiting for
     //once we need to be waiting on more than one command we will introduce an enum
     //that will, for blpop, encapsulate this vec
@@ -24,6 +25,19 @@ pub struct WaitingState {
     timeout: Option<time::Instant>,
 }
 
+#[derive(Debug)]
+struct StoredValue {
+    data: String,
+    ttl: Option<time::Instant>,
+}
+
+#[derive(Debug)]
+//string, list, set, zset, hash, stream, and vectorset
+enum RedisType {
+    String { value: StoredValue },
+    List { elements: Vec<String> },
+}
+
 #[allow(unused)] //TODO [LS]: remove the allow once we use the failure error
 #[derive(Debug)]
 pub enum RedisError {
@@ -31,170 +45,282 @@ pub enum RedisError {
     WouldBlock,
 }
 
-#[derive(Debug)]
-struct StoredValue {
-    data: String,
-    ttl: Option<time::Instant>,
-}
-
 impl Redis {
     pub fn handle_command(&mut self, cmd: Command, client_id: i32) -> Result<RespType, RedisError> {
         println!("Handling command {cmd:?} from client {client_id}");
 
         match cmd {
-            Command::Ping => Ok(RespType::SimpleString {
-                content: "PONG".into(),
-            }),
-            Command::Echo { to_echo } => Ok(RespType::BulkString {
-                data: to_echo.into_bytes(),
-            }),
+            Command::Ping => handle_ping(),
+            Command::Echo { to_echo } => handle_echo(to_echo),
             Command::Set {
                 key,
                 value,
                 options,
-            } => {
-                let value = StoredValue {
-                    data: value,
-                    ttl: options.expire().map(|exp| time::Instant::now().add(exp)),
+            } => self.handle_set(key, value, options),
+            Command::Get { key } => self.handle_get(key),
+            Command::RPush { key, elements } => self.handle_rpush(key, elements),
+            Command::LPush { key, elements } => self.handle_lpush(key, elements),
+            Command::LLen { key } => self.handle_llen(key),
+            Command::LPop { key, count } => self.handle_lpop(key, count),
+            Command::LRange { key, start, stop } => self.handle_lrange(key, start, stop),
+            Command::BlPop { key, timeout } => self.handle_blpop(client_id, key, timeout),
+            Command::Type { key } => self.handle_type(key),
+            Command::ErrorCmd { msg } => handle_error(msg),
+        }
+    }
+
+    fn handle_type(&mut self, key: String) -> Result<RespType, RedisError> {
+        //TODO [LS]: only handle this case for now, refactor will be needed later
+        if let Some(t) = self.store.get(&key) {
+            match t {
+                RedisType::String { value: _ } => Ok(RespType::SimpleString {
+                    content: "string".into(),
+                }),
+                RedisType::List { elements: _ } => Ok(RespType::SimpleString {
+                    content: "list".into(),
+                }),
+            }
+        } else {
+            Ok(RespType::SimpleString {
+                content: "none".into(),
+            })
+        }
+    }
+
+    fn handle_blpop(
+        &mut self,
+        client_id: i32,
+        key: String,
+        timeout: Option<time::Duration>,
+    ) -> Result<RespType, RedisError> {
+        if !self.ensure_type(&key, "list") {
+            return Ok(RespType::SimpleError {
+                content: "WRONGTYPE Operation against a key holding the wrong kind of value".into(),
+            });
+        }
+
+        match self.store.get(&key).and_then(|t| match t {
+            RedisType::List { elements } => elements.first(),
+            _ => panic!("Illegal state"),
+        }) {
+            Some(_) => {
+                let val = self
+                    .store
+                    .get_mut(&key)
+                    .map(|t| match t {
+                        RedisType::List { elements } => elements,
+                        _ => panic!("Illegal state"),
+                    })
+                    .unwrap()
+                    .remove(0);
+
+                Ok(RespType::Array {
+                    elements: vec![
+                        RespType::BulkString {
+                            data: key.into_bytes(),
+                        },
+                        RespType::BulkString {
+                            data: val.into_bytes(),
+                        },
+                    ],
+                })
+            }
+            None => {
+                let waiting_state = self.waiting_clients.entry(client_id).or_default();
+
+                waiting_state.keys.push(key.clone());
+                waiting_state.timeout = timeout.map(|dur| Instant::now() + dur);
+
+                self.blocking_keys
+                    .entry(key)
+                    .or_insert(vec![])
+                    .push(client_id);
+
+                Err(RedisError::WouldBlock)
+            }
+        }
+    }
+
+    fn handle_lrange(
+        &mut self,
+        key: String,
+        start: i64,
+        stop: i64,
+    ) -> Result<RespType, RedisError> {
+        if !self.ensure_type(&key, "list") {
+            return Ok(RespType::SimpleError {
+                content: "WRONGTYPE Operation against a key holding the wrong kind of value".into(),
+            });
+        }
+
+        // Out of range indexes will not produce an error.
+        // If start is larger than the end of the list, an empty list is returned.
+        // If stop is larger than the actual end of the list, Redis will treat it like the last element of the list.
+        match self.store.get(&key) {
+            Some(RedisType::List { elements }) if !elements.is_empty() => {
+                let compute_real_index = |idx: i64| -> usize {
+                    if idx < 0 {
+                        (elements.len() as i64).saturating_add(idx).max(0) as usize
+                    } else {
+                        idx as usize
+                    }
                 };
 
-                self.kv_store.insert(key, value);
+                let start = compute_real_index(start);
+                let stop = compute_real_index(stop).min(elements.len().saturating_sub(1));
 
-                Ok(RespType::SimpleString {
-                    content: "OK".into(),
-                })
-            }
-            Command::Get { key } => match self.kv_store.get(key.as_str()) {
-                Some(v) if v.ttl.is_some_and(|ttl| time::Instant::now().gt(&ttl)) => {
-                    self.kv_store.remove(&key);
-                    Ok(RespType::NullBulkString)
-                }
-                Some(v) => Ok(RespType::BulkString {
-                    data: v.data.as_bytes().to_vec(),
-                }),
-                None => Ok(RespType::NullBulkString),
-            },
-            Command::RPush { key, mut elements } => {
-                let entry = self
-                    .list_store
-                    .entry(key.clone())
-                    .and_modify(|l| l.append(&mut elements))
-                    .or_insert(elements);
-
-                //"notify" waiting clients
-                if let Some(clients) = self.blocking_keys.get_mut(&key).filter(|v| !v.is_empty()) {
-                    let longest = clients.remove(0);
-                    //a client can only be waiting for a single event at a time, if it stops
-                    //waiting then it is removed from the to_be_notified map
-                    self.to_be_notified.push((longest, key.clone()));
-                }
-
-                Ok(RespType::Integer {
-                    integer: entry.len() as i64,
-                })
-            }
-            Command::LPush { key, elements } => {
-                let entry = self
-                    .list_store
-                    .entry(key.clone())
-                    .and_modify(|l| {
-                        elements.iter().for_each(|el| l.insert(0, el.clone()));
-                    })
-                    .or_insert(elements.into_iter().rev().collect());
-
-                //"notify" waiting clients
-                if let Some(clients) = self.blocking_keys.get_mut(&key).filter(|v| !v.is_empty()) {
-                    let longest = clients.remove(0);
-                    //a client can only be waiting for a single event at a time, if it stops
-                    //waiting then it is removed from the to_be_notified map
-                    self.to_be_notified.push((longest, key.clone()));
-                }
-
-                Ok(RespType::Integer {
-                    integer: entry.len() as i64,
-                })
-            }
-            Command::LLen { key } => {
-                let len = self.list_store.get(&key).map_or(0, |l| l.len());
-
-                Ok(RespType::Integer {
-                    integer: len as i64,
-                })
-            }
-            Command::LPop { key, count } => self.lpop(key, count),
-            Command::LRange { key, start, stop } => {
-                // Out of range indexes will not produce an error.
-                // If start is larger than the end of the list, an empty list is returned.
-                // If stop is larger than the actual end of the list, Redis will treat it like the last element of the list.
-                match self.list_store.get(&key) {
-                    Some(list) if !list.is_empty() => {
-                        let compute_real_index = |idx: i64| -> usize {
-                            if idx < 0 {
-                                (list.len() as i64).saturating_add(idx).max(0) as usize
-                            } else {
-                                idx as usize
-                            }
-                        };
-
-                        let start = compute_real_index(start);
-                        let stop = compute_real_index(stop).min(list.len().saturating_sub(1));
-
-                        let elements = if start > stop {
-                            vec![]
-                        } else {
-                            list[start..=stop]
-                                .iter()
-                                .map(|val| RespType::BulkString {
-                                    data: val.as_bytes().to_vec(),
-                                })
-                                .collect()
-                        };
-
-                        Ok(RespType::Array { elements })
-                    }
-                    _ => Ok(RespType::Array { elements: vec![] }),
-                }
-            }
-            Command::BlPop { key, timeout } => {
-                match self.list_store.get(&key).and_then(|l| l.first()) {
-                    Some(_) => {
-                        let val = self.list_store.get_mut(&key).unwrap().remove(0);
-                        Ok(RespType::Array {
-                            elements: vec![
-                                RespType::BulkString {
-                                    data: key.into_bytes(),
-                                },
-                                RespType::BulkString {
-                                    data: val.into_bytes(),
-                                },
-                            ],
-                        })
-                    }
-                    None => {
-                        let waiting_state = self.waiting_clients.entry(client_id).or_default();
-
-                        waiting_state.keys.push(key.clone());
-                        waiting_state.timeout = timeout.map(|dur| Instant::now() + dur);
-
-                        self.blocking_keys
-                            .entry(key)
-                            .or_insert(vec![])
-                            .push(client_id);
-
-                        Err(RedisError::WouldBlock)
-                    }
-                }
-            }
-            Command::Type { key } => {
-                //TODO [LS]: only handle this case for now, refactor will be needed later
-                if let Some(_) = self.kv_store.get(&key) {
-                    Ok(RespType::SimpleString { content: "string".into() })
+                let elements = if start > stop {
+                    vec![]
                 } else {
-                    Ok(RespType::SimpleString { content: "none".into() })
-                }
+                    elements[start..=stop]
+                        .iter()
+                        .map(|val| RespType::BulkString {
+                            data: val.as_bytes().to_vec(),
+                        })
+                        .collect()
+                };
+
+                Ok(RespType::Array { elements })
             }
-            Command::ErrorCmd { msg } => Ok(RespType::SimpleError { content: msg }),
+            Some(RedisType::List { elements: _ }) => Ok(RespType::Array { elements: vec![] }),
+            _ => panic!("Illegal state"),
         }
+    }
+
+    fn handle_llen(&mut self, key: String) -> Result<RespType, RedisError> {
+        if !self.ensure_type(&key, "list") {
+            return Ok(RespType::SimpleError {
+                content: "WRONGTYPE Operation against a key holding the wrong kind of value".into(),
+            });
+        }
+
+        let len = self.store.get(&key).map_or(0, |t| match t {
+            RedisType::List { elements } => elements.len(),
+            _ => panic!("Illegal state"),
+        });
+
+        Ok(RespType::Integer {
+            integer: len as i64,
+        })
+    }
+
+    fn handle_lpush(&mut self, key: String, elements: Vec<String>) -> Result<RespType, RedisError> {
+        if !self.ensure_type(&key, "list") {
+            return Ok(RespType::SimpleError {
+                content: "WRONGTYPE Operation against a key holding the wrong kind of value".into(),
+            });
+        }
+
+        let entry = self
+            .store
+            .entry(key.clone())
+            .and_modify(|l| match l {
+                RedisType::List { elements: els } => {
+                    elements.iter().for_each(|el| els.insert(0, el.clone()))
+                }
+                _ => panic!("Illegal state"),
+            })
+            .or_insert(RedisType::List {
+                elements: elements.into_iter().rev().collect(),
+            });
+        //"notify" waiting clients
+        if let Some(clients) = self.blocking_keys.get_mut(&key).filter(|v| !v.is_empty()) {
+            let longest = clients.remove(0);
+            //a client can only be waiting for a single event at a time, if it stops
+            //waiting then it is removed from the to_be_notified map
+            self.to_be_notified.push((longest, key.clone()));
+        }
+
+        Ok(RespType::Integer {
+            integer: match entry {
+                RedisType::List { elements } => elements.len() as i64,
+                _ => panic!("Illegal state"),
+            },
+        })
+    }
+
+    fn handle_rpush(
+        &mut self,
+        key: String,
+        mut elements: Vec<String>,
+    ) -> Result<RespType, RedisError> {
+        if !self.ensure_type(&key, "list") {
+            return Ok(RespType::SimpleError {
+                content: "WRONGTYPE Operation against a key holding the wrong kind of value".into(),
+            });
+        }
+
+        let entry = self
+            .store
+            .entry(key.clone())
+            .and_modify(|l| match l {
+                RedisType::List { elements: els } => els.append(&mut elements),
+                _ => panic!("Illegal state"),
+            })
+            .or_insert(RedisType::List { elements });
+
+        //"notify" waiting clients
+        if let Some(clients) = self.blocking_keys.get_mut(&key).filter(|v| !v.is_empty()) {
+            let longest = clients.remove(0);
+            //a client can only be waiting for a single event at a time, if it stops
+            //waiting then it is removed from the to_be_notified map
+            self.to_be_notified.push((longest, key.clone()));
+        }
+
+        Ok(RespType::Integer {
+            integer: match entry {
+                RedisType::List { elements } => elements.len() as i64,
+                _ => panic!("Illegal state"),
+            },
+        })
+    }
+
+    fn handle_get(&mut self, key: String) -> Result<RespType, RedisError> {
+        if !self.ensure_type(&key, "string") {
+            return Ok(RespType::SimpleError {
+                content: "WRONGTYPE Operation against a key holding the wrong kind of value".into(),
+            });
+        }
+
+        match self.store.get(&key) {
+            Some(RedisType::String { value: v })
+                if v.ttl.is_some_and(|ttl| time::Instant::now().gt(&ttl)) =>
+            {
+                self.store.remove(&key);
+                Ok(RespType::NullBulkString)
+            }
+            Some(RedisType::String { value: v }) => Ok(RespType::BulkString {
+                data: v.data.as_bytes().to_vec(),
+            }),
+            Some(_) => {
+                panic!("Should be unreachable, due to type check at the beginning of this function")
+            }
+            None => Ok(RespType::NullBulkString),
+        }
+    }
+
+    fn handle_set(
+        &mut self,
+        key: String,
+        value: String,
+        options: crate::command::SetOptions,
+    ) -> Result<RespType, RedisError> {
+        if !self.ensure_type(&key, "string") {
+            return Ok(RespType::SimpleError {
+                content: "WRONGTYPE Operation against a key holding the wrong kind of value".into(),
+            });
+        }
+
+        let value = StoredValue {
+            data: value,
+            ttl: options.expire().map(|exp| time::Instant::now().add(exp)),
+        };
+
+        self.store.insert(key, RedisType::String { value });
+
+        Ok(RespType::SimpleString {
+            content: "OK".into(),
+        })
     }
 
     pub(crate) fn remove_waiting(&mut self, client_id: &i32) {
@@ -239,22 +365,40 @@ impl Redis {
     pub(crate) fn compute_ready(&mut self) {
         while let Some((client_id, key)) = self.to_be_notified.pop() {
             let cl_key = key.clone();
-            let resp = self.lpop(key, 1).map(|val| RespType::Array {
-                elements: vec![RespType::BulkString {
-                    data: cl_key.as_bytes().to_vec(),
-                }, val],
-            })
-            .unwrap();
+            let resp = self
+                .handle_lpop(key, 1)
+                .map(|val| RespType::Array {
+                    elements: vec![
+                        RespType::BulkString {
+                            data: cl_key.as_bytes().to_vec(),
+                        },
+                        val,
+                    ],
+                })
+                .unwrap();
 
             self.ready.push((client_id, resp));
         }
     }
 
-    fn lpop(&mut self, key: String, count: usize) -> Result<RespType, RedisError> {
+    fn handle_lpop(&mut self, key: String, count: usize) -> Result<RespType, RedisError> {
+        if !self.ensure_type(&key, "list") {
+            return Ok(RespType::SimpleError {
+                content: "WRONGTYPE Operation against a key holding the wrong kind of value".into(),
+            });
+        }
+
         let mut pop_list = Vec::<String>::with_capacity(count);
 
-        while let Some(list) = self.list_store.get_mut(&key).filter(|v| !v.is_empty())
-            && pop_list.len() < count
+        while let Some(list) = self.store.get_mut(&key).and_then(|v| {
+            if let RedisType::List { elements } = v
+                && !elements.is_empty()
+            {
+                Some(elements)
+            } else {
+                None
+            }
+        }) && pop_list.len() < count
         {
             pop_list.push(list.remove(0));
         }
@@ -274,6 +418,32 @@ impl Redis {
             }),
         }
     }
+
+    fn ensure_type(&self, key: &str, wanted: &str) -> bool {
+        match self.store.get(key) {
+            Some(t) => match t {
+                RedisType::String { value: _ } => wanted == "string",
+                RedisType::List { elements: _ } => wanted == "list",
+            },
+            None => true,
+        }
+    }
+}
+
+fn handle_error(msg: String) -> Result<RespType, RedisError> {
+    Ok(RespType::SimpleError { content: msg })
+}
+
+fn handle_echo(to_echo: String) -> Result<RespType, RedisError> {
+    Ok(RespType::BulkString {
+        data: to_echo.into_bytes(),
+    })
+}
+
+fn handle_ping() -> Result<RespType, RedisError> {
+    Ok(RespType::SimpleString {
+        content: "PONG".into(),
+    })
 }
 
 #[cfg(test)]
