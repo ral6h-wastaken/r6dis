@@ -69,6 +69,7 @@ impl Redis {
             Command::LRange { key, start, stop } => self.handle_lrange(key, start, stop),
             Command::BlPop { keys, timeout } => self.handle_blpop(client_id, keys, timeout),
             Command::Type { key } => self.handle_type(key),
+            Command::XAdd { key, id, elements } => self.handle_xadd(key, id, elements),
             Command::ErrorCmd { msg } => handle_error(msg),
         }
     }
@@ -489,6 +490,15 @@ impl Redis {
             },
             None => true,
         }
+    }
+
+    fn handle_xadd(
+        &self,
+        key: String,
+        id: String,
+        elements: Vec<(String, String)>,
+    ) -> Result<RespType, RedisError> {
+        todo!()
     }
 }
 

@@ -44,6 +44,11 @@ pub enum Command {
     Type {
         key: String,
     },
+    XAdd {
+        key: String, 
+        id: String,
+        elements: Vec<(String, String)>
+    },
     ErrorCmd {
         msg: String,
     },
@@ -96,6 +101,7 @@ impl Command {
                             "LPOP" => parse_lpop_cmd(&elements),
                             "BLPOP" => parse_blpop_cmd(&elements),
                             "TYPE" => parse_type_cmd(&elements),
+                            "XADD" => parse_xadd_cmd(&elements),
                             _ => Err(io::Error::other("NYI")),
                         }
                     }
@@ -105,6 +111,57 @@ impl Command {
             _ => Err(io::Error::other("Redis Commands should be RESP arrays")),
         }
     }
+}
+
+fn parse_xadd_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
+
+    if !elements.len() < 5 {
+        return Err(io::Error::other("Invalid XADD command, at least key, id and a (k,v) pair are expected"))
+    }
+
+    let key = elements
+        .get(1)
+        .and_then(|k| match k {
+            RespType::BulkString { data } => Some(data),
+            _ => None,
+        })
+        .and_then(|utf8| String::from_utf8(utf8.clone()).ok())
+        .ok_or(io::Error::other(
+            "Invalid XADD command: absent or invalid key",
+        ))?;
+
+    let id = elements
+        .get(2)
+        .and_then(|k| match k {
+            RespType::BulkString { data } => Some(data),
+            _ => None,
+        })
+        .and_then(|utf8| String::from_utf8(utf8.clone()).ok())
+        .ok_or(io::Error::other(
+            "Invalid XADD command: absent or invalid id",
+        ))?;
+    
+
+    let elements = elements.iter()
+        .skip(3)
+        .map(|k| match k {
+            RespType::BulkString { data } => Ok(data),
+            _ => Err(io::Error::other("Invalid resp type while parsing XADD cmd")),
+        })
+        .map(|utf8| match utf8 {
+            Ok(utf8) => String::from_utf8(utf8.clone()).map_err(|_| io::Error::other("")),
+            Err(err) => Err(err)
+        })
+        .collect::<Result<Vec<String>, io::Error>>()?
+            .chunks(2)
+        .map(|v| match v {
+            [k, v] => Ok((k.clone(), v.clone())), 
+            _ => Err(io::Error::other("Invalid number of key-value arguments in XADD command"))
+        })
+        .collect::<Result<Vec<(String, String)>, io::Error>>()?;
+
+    Ok(Command::XAdd { key, id, elements })
+
 }
 
 fn parse_type_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
@@ -411,7 +468,7 @@ mod test {
     use core::time;
 
     use crate::{
-        command::{Command, SetOptions, parse_set_cmd},
+        command::*,
         resp::RespType,
     };
 
@@ -530,5 +587,45 @@ mod test {
                 .to_string()
                 .starts_with("invalid expiry value: ")
         )
+    }
+
+    #[test]
+    fn test_parse_xadd_command() {
+        let elements = vec![
+            RespType::BulkString { data: "XADD".as_bytes().to_vec() },
+            RespType::BulkString { data: "key".as_bytes().to_vec() },
+            RespType::BulkString { data: "id".as_bytes().to_vec() },
+            RespType::BulkString { data: "first_el".as_bytes().to_vec() },
+            RespType::BulkString { data: "first_val".as_bytes().to_vec() },
+            RespType::BulkString { data: "second_el".as_bytes().to_vec() },
+            RespType::BulkString { data: "second_val".as_bytes().to_vec() },
+        ];
+
+        let expected = Command::XAdd { key: "key".into(), id: "id".into(), elements: vec![
+            ("first_el".into(), "first_val".into()),
+            ("second_el".into(), "second_val".into())
+        ] };
+
+        let parsed = parse_xadd_cmd(&elements);
+        assert!(parsed.is_ok());
+
+        assert_eq!(expected, parsed.unwrap());
+    }
+
+    #[test]
+    fn test_parse_xadd_command_invalid_args() {
+        let elements = vec![
+            RespType::BulkString { data: "XADD".as_bytes().to_vec() },
+            RespType::BulkString { data: "key".as_bytes().to_vec() },
+            RespType::BulkString { data: "id".as_bytes().to_vec() },
+            RespType::BulkString { data: "first_el".as_bytes().to_vec() },
+            RespType::BulkString { data: "first_val".as_bytes().to_vec() },
+            RespType::BulkString { data: "second_el".as_bytes().to_vec() },
+        ];
+
+        let expected = "Invalid number of key-value arguments in XADD command";
+        let parsed = parse_xadd_cmd(&elements);
+
+        assert!(parsed.is_err_and(|err| err.to_string() == expected));
     }
 }
