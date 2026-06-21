@@ -67,7 +67,7 @@ impl Redis {
             Command::LLen { key } => self.handle_llen(key),
             Command::LPop { key, count } => self.handle_lpop(&key, count),
             Command::LRange { key, start, stop } => self.handle_lrange(key, start, stop),
-            Command::BlPop { key, timeout } => self.handle_blpop(client_id, key, timeout),
+            Command::BlPop { keys, timeout } => self.handle_blpop(client_id, keys, timeout),
             Command::Type { key } => self.handle_type(key),
             Command::ErrorCmd { msg } => handle_error(msg),
         }
@@ -94,57 +94,65 @@ impl Redis {
     fn handle_blpop(
         &mut self,
         client_id: i32,
-        key: String,
+        keys: Vec<String>,
         timeout: Option<time::Duration>,
     ) -> Result<RespType, RedisError> {
-        if !self.ensure_type(&key, "list") {
-            return Ok(RespType::SimpleError {
-                content: "WRONGTYPE Operation against a key holding the wrong kind of value".into(),
-            });
-        }
-
-        match self.store.get(&key).and_then(|t| match t {
-            RedisType::List { elements } => elements.first(),
-            _ => panic!("Illegal state"),
-        }) {
-            Some(_) => {
-                let val = self
-                    .store
-                    .get_mut(&key)
-                    .map(|t| match t {
-                        RedisType::List { elements } => elements,
-                        _ => panic!("Illegal state"),
-                    })
-                    .unwrap()
-                    .remove(0);
-
-                Ok(RespType::Array {
-                    elements: vec![
-                        RespType::BulkString {
-                            data: key.into_bytes(),
-                        },
-                        RespType::BulkString {
-                            data: val.into_bytes(),
-                        },
-                    ],
-                })
+        for key in keys.iter() {
+            if !self.ensure_type(key, "list") {
+                return Ok(RespType::SimpleError {
+                    content: "WRONGTYPE Operation against a key holding the wrong kind of value"
+                        .into(),
+                });
             }
-            None => {
-                let keys = vec![key.clone()];
-                let timeout = timeout.map(|dur| Instant::now() + dur);
 
-                //a given client can only be blocked on a given state at once
-                self.waiting_clients
-                    .insert(client_id, (WaitingState::BlPop { keys }, timeout));
+            match self.store.get(key).and_then(|t| match t {
+                RedisType::List { elements } => elements.first(),
+                _ => panic!("Illegal state"),
+            }) {
+                Some(_) => {
+                    let val = self
+                        .store
+                        .get_mut(key)
+                        .map(|t| match t {
+                            RedisType::List { elements } => elements,
+                            _ => panic!("Illegal state"),
+                        })
+                        .unwrap()
+                        .remove(0);
 
-                self.blpop_blocking_keys
-                    .entry(key)
-                    .or_insert(vec![])
-                    .push(client_id);
-
-                Err(RedisError::WouldBlock)
+                    //as soon as we find a matching entry we return ok
+                    return Ok(RespType::Array {
+                        elements: vec![
+                            RespType::BulkString {
+                                data: key.clone().into_bytes(),
+                            },
+                            RespType::BulkString {
+                                data: val.into_bytes(),
+                            },
+                        ],
+                    });
+                }
+                None => {
+                    //we continue iterating, maybe some other key in keys will have an element
+                    //available
+                }
             }
         }
+
+        let timeout = timeout.map(|dur| Instant::now() + dur);
+
+        for key in keys.iter() {
+            self.blpop_blocking_keys
+                .entry(key.clone())
+                .or_insert(vec![])
+                .push(client_id);
+        }
+
+        //a given client can only be blocked on a given state at once
+        self.waiting_clients
+            .insert(client_id, (WaitingState::BlPop { keys }, timeout));
+
+        Err(RedisError::WouldBlock)
     }
 
     fn handle_lrange(

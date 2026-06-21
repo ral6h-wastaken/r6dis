@@ -38,7 +38,7 @@ pub enum Command {
         count: usize,
     },
     BlPop {
-        key: String,
+        keys: Vec<String>,
         timeout: Option<time::Duration>,
     },
     Type {
@@ -123,19 +123,26 @@ fn parse_type_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
 }
 
 fn parse_blpop_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
-    let key = elements
-        .get(1)
-        .and_then(|k| match k {
+    let keys = elements
+        .iter()
+        .skip(1)
+        .filter_map(|k| match k {
             RespType::BulkString { data } => Some(data),
             _ => None,
         })
-        .and_then(|utf8| String::from_utf8(utf8.clone()).ok())
-        .ok_or(io::Error::other(
+        .filter_map(|utf8| String::from_utf8(utf8.clone()).ok())
+        //we take until we encounter a valid number, which would be the timeout
+        .take_while(|str_repr| str_repr.parse::<u64>().is_err()) 
+        .collect::<Vec<String>>();
+
+    if keys.len() == 0 {
+        return Err(io::Error::other(
             "Invalid BLPOP command: absent or invalid key",
-        ))?;
+        ));
+    }
 
     let timeout = elements
-        .get(2)
+        .last()
         .and_then(|k| match k {
             RespType::BulkString { data } => Some(data),
             _ => None,
@@ -144,7 +151,7 @@ fn parse_blpop_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
         .and_then(|str_repr| str_repr.parse::<u64>().ok())
         .map(Duration::from_secs);
 
-    Ok(Command::BlPop { key, timeout })
+    Ok(Command::BlPop { keys, timeout })
 }
 
 fn parse_lpop_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
