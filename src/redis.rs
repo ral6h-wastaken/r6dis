@@ -40,6 +40,13 @@ struct StoredValue {
 enum RedisType {
     String { value: StoredValue },
     List { elements: Vec<String> },
+    Stream { elements: Vec<StreamElement> },
+}
+
+#[derive(Debug)]
+struct StreamElement {
+    id: String,
+    data: HashMap<String, String>,
 }
 
 #[allow(unused)] //TODO [LS]: remove the allow once we use the failure error
@@ -83,6 +90,9 @@ impl Redis {
                 }),
                 RedisType::List { elements: _ } => Ok(RespType::SimpleString {
                     content: "list".into(),
+                }),
+                RedisType::Stream { elements: _ } => Ok(RespType::SimpleString {
+                    content: "stream".into(),
                 }),
             }
         } else {
@@ -487,18 +497,41 @@ impl Redis {
             Some(t) => match t {
                 RedisType::String { value: _ } => wanted == "string",
                 RedisType::List { elements: _ } => wanted == "list",
+                RedisType::Stream { elements: _ } => wanted == "stream",
             },
             None => true,
         }
     }
 
     fn handle_xadd(
-        &self,
+        &mut self,
         key: String,
         id: String,
         elements: Vec<(String, String)>,
     ) -> Result<RespType, RedisError> {
-        todo!()
+        if !self.ensure_type(&key, "stream") {
+            return Ok(RespType::SimpleError {
+                content: "WRONGTYPE Operation against a key holding the wrong kind of value".into(),
+            });
+        }
+
+        let id_utf8 = id.as_bytes().to_vec();
+        let data: HashMap<String, String> = elements.into_iter().collect();
+
+        self.store
+            .entry(key)
+            .and_modify(|t| match t {
+                RedisType::Stream { elements } => elements.push(StreamElement {
+                    id: id.clone(),
+                    data: data.clone(),
+                }),
+                _ => panic!("Illegal state"),
+            })
+            .or_insert(RedisType::Stream {
+                elements: vec![StreamElement { id, data }],
+            });
+
+        Ok(RespType::BulkString { data: id_utf8 })
     }
 }
 

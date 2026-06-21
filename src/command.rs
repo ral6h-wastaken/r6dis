@@ -45,9 +45,9 @@ pub enum Command {
         key: String,
     },
     XAdd {
-        key: String, 
+        key: String,
         id: String,
-        elements: Vec<(String, String)>
+        elements: Vec<(String, String)>,
     },
     ErrorCmd {
         msg: String,
@@ -114,9 +114,10 @@ impl Command {
 }
 
 fn parse_xadd_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
-
-    if !elements.len() < 5 {
-        return Err(io::Error::other("Invalid XADD command, at least key, id and a (k,v) pair are expected"))
+    if elements.len() < 5 {
+        return Err(io::Error::other(
+            "Invalid XADD command, at least key, id and a (k,v) pair are expected",
+        ));
     }
 
     let key = elements
@@ -140,9 +141,9 @@ fn parse_xadd_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
         .ok_or(io::Error::other(
             "Invalid XADD command: absent or invalid id",
         ))?;
-    
 
-    let elements = elements.iter()
+    let elements = elements
+        .iter()
         .skip(3)
         .map(|k| match k {
             RespType::BulkString { data } => Ok(data),
@@ -150,18 +151,19 @@ fn parse_xadd_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
         })
         .map(|utf8| match utf8 {
             Ok(utf8) => String::from_utf8(utf8.clone()).map_err(|_| io::Error::other("")),
-            Err(err) => Err(err)
+            Err(err) => Err(err),
         })
         .collect::<Result<Vec<String>, io::Error>>()?
-            .chunks(2)
+        .chunks(2)
         .map(|v| match v {
-            [k, v] => Ok((k.clone(), v.clone())), 
-            _ => Err(io::Error::other("Invalid number of key-value arguments in XADD command"))
+            [k, v] => Ok((k.clone(), v.clone())),
+            _ => Err(io::Error::other(
+                "Invalid number of key-value arguments in XADD command",
+            )),
         })
         .collect::<Result<Vec<(String, String)>, io::Error>>()?;
 
     Ok(Command::XAdd { key, id, elements })
-
 }
 
 fn parse_type_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
@@ -189,7 +191,7 @@ fn parse_blpop_cmd(elements: &[RespType]) -> Result<Command, io::Error> {
         })
         .filter_map(|utf8| String::from_utf8(utf8.clone()).ok())
         //we take until we encounter a valid number, which would be the timeout
-        .take_while(|str_repr| str_repr.parse::<u64>().is_err()) 
+        .take_while(|str_repr| str_repr.parse::<u64>().is_err())
         .collect::<Vec<String>>();
 
     if keys.len() == 0 {
@@ -467,10 +469,7 @@ fn parse_set_options(elements: &[RespType]) -> Result<SetOptions, io::Error> {
 mod test {
     use core::time;
 
-    use crate::{
-        command::*,
-        resp::RespType,
-    };
+    use crate::{command::*, resp::RespType};
 
     #[test]
     fn test_parse_set_command_no_options() {
@@ -592,19 +591,37 @@ mod test {
     #[test]
     fn test_parse_xadd_command() {
         let elements = vec![
-            RespType::BulkString { data: "XADD".as_bytes().to_vec() },
-            RespType::BulkString { data: "key".as_bytes().to_vec() },
-            RespType::BulkString { data: "id".as_bytes().to_vec() },
-            RespType::BulkString { data: "first_el".as_bytes().to_vec() },
-            RespType::BulkString { data: "first_val".as_bytes().to_vec() },
-            RespType::BulkString { data: "second_el".as_bytes().to_vec() },
-            RespType::BulkString { data: "second_val".as_bytes().to_vec() },
+            RespType::BulkString {
+                data: "XADD".as_bytes().to_vec(),
+            },
+            RespType::BulkString {
+                data: "key".as_bytes().to_vec(),
+            },
+            RespType::BulkString {
+                data: "id".as_bytes().to_vec(),
+            },
+            RespType::BulkString {
+                data: "first_el".as_bytes().to_vec(),
+            },
+            RespType::BulkString {
+                data: "first_val".as_bytes().to_vec(),
+            },
+            RespType::BulkString {
+                data: "second_el".as_bytes().to_vec(),
+            },
+            RespType::BulkString {
+                data: "second_val".as_bytes().to_vec(),
+            },
         ];
 
-        let expected = Command::XAdd { key: "key".into(), id: "id".into(), elements: vec![
-            ("first_el".into(), "first_val".into()),
-            ("second_el".into(), "second_val".into())
-        ] };
+        let expected = Command::XAdd {
+            key: "key".into(),
+            id: "id".into(),
+            elements: vec![
+                ("first_el".into(), "first_val".into()),
+                ("second_el".into(), "second_val".into()),
+            ],
+        };
 
         let parsed = parse_xadd_cmd(&elements);
         assert!(parsed.is_ok());
@@ -615,12 +632,24 @@ mod test {
     #[test]
     fn test_parse_xadd_command_invalid_args() {
         let elements = vec![
-            RespType::BulkString { data: "XADD".as_bytes().to_vec() },
-            RespType::BulkString { data: "key".as_bytes().to_vec() },
-            RespType::BulkString { data: "id".as_bytes().to_vec() },
-            RespType::BulkString { data: "first_el".as_bytes().to_vec() },
-            RespType::BulkString { data: "first_val".as_bytes().to_vec() },
-            RespType::BulkString { data: "second_el".as_bytes().to_vec() },
+            RespType::BulkString {
+                data: "XADD".as_bytes().to_vec(),
+            },
+            RespType::BulkString {
+                data: "key".as_bytes().to_vec(),
+            },
+            RespType::BulkString {
+                data: "id".as_bytes().to_vec(),
+            },
+            RespType::BulkString {
+                data: "first_el".as_bytes().to_vec(),
+            },
+            RespType::BulkString {
+                data: "first_val".as_bytes().to_vec(),
+            },
+            RespType::BulkString {
+                data: "second_el".as_bytes().to_vec(),
+            },
         ];
 
         let expected = "Invalid number of key-value arguments in XADD command";
