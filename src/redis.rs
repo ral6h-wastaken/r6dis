@@ -65,7 +65,7 @@ impl Redis {
             Command::RPush { key, elements } => self.handle_rpush(key, elements),
             Command::LPush { key, elements } => self.handle_lpush(key, elements),
             Command::LLen { key } => self.handle_llen(key),
-            Command::LPop { key, count } => self.handle_lpop(key, count),
+            Command::LPop { key, count } => self.handle_lpop(&key, count),
             Command::LRange { key, start, stop } => self.handle_lrange(key, start, stop),
             Command::BlPop { key, timeout } => self.handle_blpop(client_id, key, timeout),
             Command::Type { key } => self.handle_type(key),
@@ -230,7 +230,11 @@ impl Redis {
                 elements: elements.into_iter().rev().collect(),
             });
         //"notify" waiting clients
-        if let Some(clients) = self.blpop_blocking_keys.get_mut(&key).filter(|v| !v.is_empty()) {
+        if let Some(clients) = self
+            .blpop_blocking_keys
+            .get_mut(&key)
+            .filter(|v| !v.is_empty())
+        {
             let longest = clients.remove(0);
             //a client can only be waiting for a single event at a time, if it stops
             //waiting then it is removed from the to_be_notified map
@@ -257,6 +261,8 @@ impl Redis {
             });
         }
 
+        let elements_len = elements.len();
+
         let entry = self
             .store
             .entry(key.clone())
@@ -267,12 +273,23 @@ impl Redis {
             .or_insert(RedisType::List { elements });
 
         //"notify" waiting clients
-        if let Some(clients) = self.blpop_blocking_keys.get_mut(&key).filter(|v| !v.is_empty()) {
-            let longest = clients.remove(0);
-            //a client can only be waiting for a single event at a time, if it stops
-            //waiting then it is removed from the to_be_notified map
-            self.to_be_notified
-                .push((longest, NotificationEvent::BlPopEvent { key: key.clone() }));
+        if let Some(clients) = self
+            .blpop_blocking_keys
+            .get_mut(&key)
+            .filter(|v| !v.is_empty())
+        {
+            let mut notified = 0;
+            while let Some(_) = clients.get(0)
+                && notified < elements_len
+            {
+                let longest = clients.remove(0);
+                //a client can only be waiting for a single event at a time, if it stops
+                //waiting then it is removed from the to_be_notified map
+                self.to_be_notified
+                    .push((longest, NotificationEvent::BlPopEvent { key: key.clone() }));
+
+                notified += 1;
+            }
         }
 
         Ok(RespType::Integer {
@@ -375,16 +392,37 @@ impl Redis {
     }
 
     pub(crate) fn compute_ready(&mut self) {
-        while let Some((client_id, notification)) = self.to_be_notified.pop() {
+        while let Some(_) = self.to_be_notified.first() {
+            let (client_id, notification) = self.to_be_notified.remove(0);
+
             match notification {
                 NotificationEvent::BlPopEvent { key } => {
-                    let cl_key = key.clone();
+                    let (state, _) = self
+                        .waiting_clients
+                        .remove(&client_id)
+                        .expect("Invalid state: waiting client without keys");
+
+                    //this check will be useful for when we'll introduce new
+                    //blocking states in the future
+                    #[allow(irrefutable_let_patterns)]
+                    if let WaitingState::BlPop { keys } = state {
+                        for k in keys {
+                            self.blpop_blocking_keys
+                                .entry(k)
+                                .and_modify(|v| v.retain(|c| *c != client_id));
+                        }
+                    } else {
+                        panic!(
+                            "Invalid state: received blpop notification event but waiting state does not match"
+                        )
+                    }
+
                     let resp = self
-                        .handle_lpop(key, 1)
+                        .handle_lpop(&key, 1)
                         .map(|val| RespType::Array {
                             elements: vec![
                                 RespType::BulkString {
-                                    data: cl_key.as_bytes().to_vec(),
+                                    data: key.as_bytes().to_vec(),
                                 },
                                 val,
                             ],
@@ -397,8 +435,8 @@ impl Redis {
         }
     }
 
-    fn handle_lpop(&mut self, key: String, count: usize) -> Result<RespType, RedisError> {
-        if !self.ensure_type(&key, "list") {
+    fn handle_lpop(&mut self, key: &str, count: usize) -> Result<RespType, RedisError> {
+        if !self.ensure_type(key, "list") {
             return Ok(RespType::SimpleError {
                 content: "WRONGTYPE Operation against a key holding the wrong kind of value".into(),
             });
@@ -406,7 +444,7 @@ impl Redis {
 
         let mut pop_list = Vec::<String>::with_capacity(count);
 
-        while let Some(list) = self.store.get_mut(&key).and_then(|v| {
+        while let Some(list) = self.store.get_mut(key).and_then(|v| {
             if let RedisType::List { elements } = v
                 && !elements.is_empty()
             {
